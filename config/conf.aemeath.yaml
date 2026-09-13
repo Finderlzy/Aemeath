@@ -1,0 +1,215 @@
+# Aemeath 首期运行配置（本机配置，不入源码版本管理）
+#
+# 本文件是 Open-LLM-VTuber v1.2.1 的用户配置。Aemeath 的独立性通过以下方式保证：
+#   - 角色预设、数据、日志均指向 Aemeath 自己的位置，不写入上游目录
+#   - 不导入任何既有账号、历史或运行配置
+#
+# 密钥不写在本文件里：下面的 api_key 字段留空或填占位符，
+# 真实密钥通过环境变量注入（见 docs/configuration.md）。
+# 该文件被 .gitignore 排除，不会被提交。
+
+system_config:
+  conf_version: 'v1.2.1'
+  # 仅监听本机地址：首期不对外暴露服务
+  host: '127.0.0.1'
+  port: 12393
+  config_alts_dir: 'characters'
+  tool_prompts:
+    live2d_expression_prompt: 'live2d_expression_prompt'
+    proactive_speak_prompt: 'proactive_speak_prompt'
+
+character_config:
+  conf_name: 'aemeath'
+  conf_uid: 'aemeath_001'
+  # 首期沿用上游默认 Live2D 模型，不导入爱弥斯正式模型与美术资产
+  live2d_model_name: 'mao_pro'
+  character_name: 'Aemeath'
+  avatar: 'mao.png'
+  human_name: '你'
+
+  persona_prompt: |
+    你是 Aemeath，一个在用户 Windows 电脑上长期相处的 AI 伙伴。
+
+    说话风格：自然、简洁、口语化，像熟悉的同事聊天。不要客服腔，不要每次都反问，
+    不要堆砌关心。多数回复一到三句话；用户明确要求详细说明时才展开。
+
+    你必须在表达上区分"知道的"和"猜的"：
+    - 只把用户明确告诉过你、或你确实看到的内容当作已知事实。
+    - 不确定就直说不知道或不确定，不要为了把话接下去而编造用户的信息、经历或偏好。
+    - 参考"相关记忆"时，那些内容才是你记得的事；没出现在其中的，你没有记忆。
+    - 除非当前确实有屏幕摘要，否则不要声称你看到了用户的屏幕。
+
+    你有自己的判断，可以不同意用户，但不要居高临下。
+
+  agent_config:
+    # Aemeath 自有 agent（通过 docs/patches 注册到上游 agent_factory）。
+    conversation_agent_choice: 'aemeath_agent'
+
+    agent_settings:
+      aemeath_agent:
+        # Aemeath 自有 agent：对话由 aemeath 模块负责，这里只指定它使用哪个 LLM 提供商。
+        llm_provider: 'openai_compatible_llm'
+        faster_first_response: True
+        segment_method: 'pysbd'
+
+      basic_memory_agent:
+        llm_provider: 'openai_compatible_llm'
+        faster_first_response: True
+        segment_method: 'pysbd'
+        use_mcpp: False
+        mcp_enabled_servers: []
+
+      hume_ai_agent:
+        api_key: ''
+        host: 'api.hume.ai'
+        config_id: ''
+        idle_timeout: 15
+
+      letta_agent:
+        host: 'localhost'
+        port: 8283
+        id: xxx
+        faster_first_response: True
+        segment_method: 'pysbd'
+
+    llm_configs:
+      # 对话模型：OpenAI 兼容接口。首期未确定供应商，替换 provider/base_url/model 即可。
+      # 真实密钥从 AEMEATH_LLM_API_KEY 环境变量读取（见 aemeath/config）。
+      openai_compatible_llm:
+        base_url: 'https://api.example.invalid/v1'
+        llm_api_key: '${AEMEATH_LLM_API_KEY}'
+        organization_id: null
+        project_id: null
+        model: 'replace-me'
+        temperature: 1.0
+        # 用户输入优先打断；上游据此在记忆里插入中断标记
+        interrupt_method: 'user'
+
+  asr_config:
+    # 首期默认离线中文 ASR，无需密钥即可验证语音链路。
+    # 若改用 API ASR，替换 asr_model 并配置对应段落。
+    asr_model: 'sherpa_onnx_asr'
+
+    sherpa_onnx_asr:
+      model_type: 'sense_voice'
+      sense_voice: './models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/model.int8.onnx'
+      tokens: './models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/tokens.txt'
+      num_threads: 4
+      use_itn: True
+      provider: 'cpu'
+
+    faster_whisper:
+      model_path: 'large-v3-turbo'
+      download_root: 'models/whisper'
+      language: 'zh'
+      device: 'auto'
+      compute_type: 'int8'
+      prompt: ''
+
+    groq_whisper_asr:
+      api_key: ''
+      model: 'whisper-large-v3-turbo'
+      lang: 'zh'
+
+  tts_config:
+    # 首期默认 edge_tts：中文可用、无需密钥，先验证播放与取消链路。
+    tts_model: 'edge_tts'
+
+    edge_tts:
+      voice: zh-CN-XiaoxiaoNeural
+
+    # 备用：换成自带音色的 API TTS 时，从环境变量注入密钥
+    siliconflow_tts:
+      api_url: 'https://api.siliconflow.cn/v1/audio/speech'
+      api_key: '${AEMEATH_TTS_API_KEY}'
+      default_model: 'FunAudioLLM/CosyVoice2-0.5B'
+      default_voice: ''
+      sample_rate: 32000
+      response_format: 'mp3'
+      stream: true
+      speed: 1
+      gain: 0
+
+  vad_config:
+    # 本地 VAD 只用于录音分段，不引入本地对话或记忆模型
+    vad_model: 'silero_vad'
+    silero_vad:
+      orig_sr: 16000
+      target_sr: 16000
+      prob_threshold: 0.4
+      db_threshold: 60
+      required_hits: 3
+      required_misses: 24
+      smoothing_window: 5
+
+  tts_preprocessor_config:
+    # 进入 TTS 前的文本清理；首期不做翻译
+    remove_special_char: True
+    ignore_brackets: True
+    ignore_parentheses: True
+    ignore_asterisks: True
+    ignore_angle_brackets: True
+    translator_config:
+      translate_audio: False
+      translate_provider: 'deeplx'
+      deeplx:
+        deeplx_target_lang: 'ZH'
+        deeplx_api_endpoint: 'http://localhost:1188/translate'
+
+  # Aemeath 自有扩展配置。上游会忽略未知段落，实际读取见 aemeath/config.py。
+  # 路径相对项目根目录（即 Aemeath/），不是相对本文件所在目录。
+  aemeath_config:
+    data_dir: 'data'
+    log_dir: 'logs'
+    screen_capture_enabled: true
+    memory:
+      recent_turns: 12
+      recall_limit: 5
+      # 检索相似度下限（0–1）。无关查询应返回空，而不是固定返回最像的几条。
+      # 0.5 只是初始过滤值：真实嵌入模型验收时必须用同义/无关问题集重新校准。
+      similarity_floor: 0.5
+      # 后台提取任务的处理间隔（秒）
+      extraction_interval_seconds: 5.0
+    proactive:
+      cooldown_seconds: 900
+      max_per_hour: 2
+      startup_greeting_enabled: true
+      # 主动资格检查间隔（秒）
+      check_interval_seconds: 60.0
+    screen:
+      max_edge_px: 1600
+      min_interval_seconds: 60
+      min_stable_seconds: 10
+      summary_max_age_seconds: 120
+    # 记忆提取、嵌入、屏幕理解各自独立配置。
+    # api_key_env 只写环境变量名，密钥本身不进配置文件。
+    # 未配置的能力状态为 disabled；已配置但初始化失败为 error，不会静默降级。
+    providers:
+      embedding:
+        enabled: false
+        provider: 'openai_compatible'
+        base_url: ''
+        model: ''
+        api_key_env: 'AEMEATH_EMBEDDING_API_KEY'
+        timeout_seconds: 30
+        dimensions: 0
+      extraction:
+        enabled: false
+        provider: 'openai_compatible'
+        base_url: ''
+        model: ''
+        api_key_env: 'AEMEATH_EXTRACTION_API_KEY'
+        timeout_seconds: 60
+      vision:
+        enabled: false
+        provider: 'openai_compatible'
+        base_url: ''
+        model: ''
+        api_key_env: 'AEMEATH_VISION_API_KEY'
+        timeout_seconds: 60
+
+live_config:
+  # 首期不做直播接入，保留占位以满足配置结构
+  bilibili_live:
+    room_ids: []
+    sessdata: ""

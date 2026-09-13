@@ -1,0 +1,47 @@
+# Aemeath local-only boundaries (see AGENTS.md: memory, history, facts and keys stay local)
+
+# Secrets and machine-local configuration — never commit real keys or endpoints
+.env
+.env.*
+!.env.example
+config/local.yaml
+config/local.*.yaml
+aemeath/config/local.yaml
+
+# Acceptance run: this script injects real provider keys, so it stays local.
+# The acceptance *config* is committed — it holds variable names, not keys —
+# so the run stays reproducible on another machine.
+scripts/acceptance-env.ps1
+
+# Local databases and memory indexes are authoritative local state
+data/
+*.sqlite
+*.sqlite3
+*.db
+*.db-wal
+*.db-shm
+
+# Logs (transcripts and traces may contain user content)
+logs/
+*.log
+
+# Audio cache and temporary capture artifacts
+cache/
+*.wav
+*.mp3
+*.ogg
+*.opus
+*.webm
+
+# Vendored upstream keeps its own history; do not commit it as project source
+vendor/
+
+# Python / tooling
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/

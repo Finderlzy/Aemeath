@@ -1,0 +1,49 @@
+diff --git a/src/open_llm_vtuber/agent/stateless_llm/openai_compatible_llm.py b/src/open_llm_vtuber/agent/stateless_llm/openai_compatible_llm.py
+index e38a332..16a20e8 100644
+--- a/src/open_llm_vtuber/agent/stateless_llm/openai_compatible_llm.py
++++ b/src/open_llm_vtuber/agent/stateless_llm/openai_compatible_llm.py
+@@ -21,6 +21,36 @@ from .stateless_llm_interface import StatelessLLMInterface
+ from ...mcpp.types import ToolCallObject
+ 
+ 
++def _aemeath_http_client():
++    """Build the HTTP client for the conversation endpoint (Aemeath patch 0004).
++
++    The OpenAI SDK builds its own ``httpx`` client and does not read proxy or
++    TLS settings from the environment. On this machine model traffic goes
++    through a local proxy whose CA is self-signed, so every conversation would
++    fail with ``CERTIFICATE_VERIFY_FAILED`` while Aemeath's own adapters (which
++    use a shared client) worked.
++
++    ``AEMEATH_TLS_INSECURE=1`` disables verification **for this client only**;
++    a warning is logged so an insecure run is never silent.
++
++    Returns:
++        An ``httpx.AsyncClient``, or ``None`` to let the SDK use its default.
++    """
++    import os
++
++    value = os.getenv("AEMEATH_TLS_INSECURE", "").strip()
++    if value in ("", "0", "false"):
++        return None
++
++    import httpx
++
++    logger.warning(
++        "TLS certificate verification is DISABLED for the conversation endpoint "
++        "(AEMEATH_TLS_INSECURE=1). Use only against a trusted local proxy."
++    )
++    return httpx.AsyncClient(verify=False)
++
++
+ class AsyncLLM(StatelessLLMInterface):
+     def __init__(
+         self,
+@@ -50,6 +80,7 @@ class AsyncLLM(StatelessLLMInterface):
+             organization=organization_id,
+             project=project_id,
+             api_key=llm_api_key,
++            http_client=_aemeath_http_client(),
+         )
+         self.support_tools = True
+ 

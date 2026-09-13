@@ -1,0 +1,918 @@
+diff --git a/src/open_llm_vtuber/conversations/conversation_utils.py b/src/open_llm_vtuber/conversations/conversation_utils.py
+index 02286e9..95b0be9 100644
+--- a/src/open_llm_vtuber/conversations/conversation_utils.py
++++ b/src/open_llm_vtuber/conversations/conversation_utils.py
+@@ -50,8 +50,16 @@ async def process_agent_output(
+     websocket_send: WebSocketSend,
+     tts_manager: TTSTaskManager,
+     translate_engine: Optional[Any] = None,
++    bridge: Optional[Any] = None,
++    turn_id: Optional[str] = None,
+ ) -> str:
+-    """Process agent output with character information and optional translation"""
++    """Process agent output with character information and optional translation.
++
++    When ``bridge`` is supplied (the Aemeath agent), every outbound piece is
++    routed through it so it carries the turn id, audio slice id and state
++    version the client needs to reject stale output. Other agents keep
++    upstream's original path unchanged.
++    """
+     output.display_text.name = character_config.character_name
+     output.display_text.avatar = character_config.avatar
+ 
+@@ -65,6 +73,8 @@ async def process_agent_output(
+                 websocket_send,
+                 tts_manager,
+                 translate_engine,
++                bridge=bridge,
++                turn_id=turn_id,
+             )
+         elif isinstance(output, AudioOutput):
+             full_response = await handle_audio_output(output, websocket_send)
+@@ -88,8 +98,16 @@ async def handle_sentence_output(
+     websocket_send: WebSocketSend,
+     tts_manager: TTSTaskManager,
+     translate_engine: Optional[Any] = None,
++    bridge: Optional[Any] = None,
++    turn_id: Optional[str] = None,
+ ) -> str:
+-    """Handle sentence output type with optional translation support"""
++    """Handle sentence output type with optional translation support.
++
++    Text display is independent of audio: in classroom mode the sentence is
++    still shown, and only the spoken part is suppressed. The situation is
++    re-checked here, immediately before synthesis, so a mode change during
++    generation still takes effect.
++    """
+     full_response = ""
+     async for display_text, tts_text, actions in output:
+         logger.debug(f"🏃 Processing output: '''{tts_text}'''...")
+@@ -102,6 +120,31 @@ async def handle_sentence_output(
+             logger.debug("🚫 No translation engine available. Skipping translation.")
+ 
+         full_response += display_text.text
++
++        if bridge is not None and turn_id is not None:
++            # 1. Text always goes out, and is recorded as the first text
++            #    timing for this turn.
++            if display_text.text:
++                bridge.mark_first_text(turn_id)
++                await bridge.send_display_text(turn_id, display_text.text)
++
++            # 2. Audio only when the situation permits it right now.
++            if not bridge.speech_allowed_for(turn_id):
++                logger.debug("Speech suppressed for turn {} by situation.", turn_id)
++                continue
++
++            await tts_manager.speak(
++                tts_text=tts_text,
++                display_text=display_text,
++                actions=actions,
++                live2d_model=live2d_model,
++                tts_engine=tts_engine,
++                websocket_send=websocket_send,
++                bridge=bridge,
++                turn_id=turn_id,
++            )
++            continue
++
+         await tts_manager.speak(
+             tts_text=tts_text,
+             display_text=display_text,
+diff --git a/src/open_llm_vtuber/conversations/single_conversation.py b/src/open_llm_vtuber/conversations/single_conversation.py
+index 493fa9c..b69d091 100644
+--- a/src/open_llm_vtuber/conversations/single_conversation.py
++++ b/src/open_llm_vtuber/conversations/single_conversation.py
+@@ -48,6 +48,8 @@ async def process_single_conversation(
+     # Create TTSTaskManager for this conversation
+     tts_manager = TTSTaskManager()
+     full_response = ""  # Initialize full_response here
++    bridge = getattr(context, "aemeath_bridge", None)
++    turn_id = None
+ 
+     try:
+         # Send initial signals
+@@ -59,6 +61,19 @@ async def process_single_conversation(
+             user_input, context.asr_engine, websocket_send
+         )
+ 
++        # Aemeath owns turn arbitration, history and memory. Every user turn
++        # enters through the bridge so the coordinator, not this function,
++        # decides what is allowed to be produced.
++        if bridge is not None:
++            turn_id = str(await bridge.begin_user_turn(source=_turn_source(metadata)))
++            if context.history_uid:
++                bridge.set_history_uid(context.history_uid)
++            ack = await bridge.on_user_message(
++                input_text, source=_turn_source(metadata), turn_id=turn_id
++            )
++            if ack:
++                await bridge.send_display_text(turn_id, ack)
++
+         # Create batch input
+         batch_input = create_batch_input(
+             input_text=input_text,
+@@ -70,13 +85,18 @@ async def process_single_conversation(
+         # Store user message (check if we should skip storing to history)
+         skip_history = metadata and metadata.get("skip_history", False)
+         if context.history_uid and not skip_history:
+-            store_message(
+-                conf_uid=context.character_config.conf_uid,
+-                history_uid=context.history_uid,
+-                role="human",
+-                content=input_text,
+-                name=context.character_config.human_name,
+-            )
++            if bridge is not None:
++                # Aemeath's history is written by the bridge into SQLite; the
++                # upstream JSON store is not a second source of truth.
++                pass
++            else:
++                store_message(
++                    conf_uid=context.character_config.conf_uid,
++                    history_uid=context.history_uid,
++                    role="human",
++                    content=input_text,
++                    name=context.character_config.human_name,
++                )
+ 
+         if skip_history:
+             logger.debug("Skipping storing user input to history (proactive speak)")
+@@ -110,6 +130,8 @@ async def process_single_conversation(
+                         websocket_send=websocket_send,  # Pass websocket_send for audio/tts messages
+                         tts_manager=tts_manager,
+                         translate_engine=context.translate_engine,
++                        bridge=bridge,
++                        turn_id=turn_id,
+                     )
+                     # Ensure response_part is treated as a string before concatenation
+                     response_part_str = (
+@@ -149,26 +171,54 @@ async def process_single_conversation(
+         )
+ 
+         if context.history_uid and full_response:  # Check full_response before storing
+-            store_message(
+-                conf_uid=context.character_config.conf_uid,
+-                history_uid=context.history_uid,
+-                role="ai",
+-                content=full_response,
+-                name=context.character_config.character_name,
+-                avatar=context.character_config.avatar,
+-            )
++            if bridge is not None:
++                # Record the assistant message and queue extraction for the
++                # turn; both are owned by the bridge's SQLite history.
++                bridge.record_assistant_message(
++                    full_response, turn_id=turn_id, interrupted=False
++                )
++                if not skip_history:
++                    bridge.queue_extraction(turn_id=turn_id)
++            else:
++                store_message(
++                    conf_uid=context.character_config.conf_uid,
++                    history_uid=context.history_uid,
++                    role="ai",
++                    content=full_response,
++                    name=context.character_config.character_name,
++                    avatar=context.character_config.avatar,
++                )
+             logger.info(f"AI response: {full_response}")
+ 
++        if bridge is not None and turn_id is not None:
++            bridge.finish_turn(turn_id, cancelled=False)
++            bridge.mark_generation_finished(turn_id)
++
+         return full_response  # Return accumulated full_response
+ 
+     except asyncio.CancelledError:
+         logger.info(f"🤡👍 Conversation {session_emoji} cancelled because interrupted.")
++        # A cancelled turn must still be closed out so its metrics are
++        # recorded once and its late output stays rejected.
++        if bridge is not None and turn_id is not None:
++            bridge.finish_turn(turn_id, cancelled=True)
+         raise
+     except Exception as e:
+         logger.error(f"Error in conversation chain: {e}")
+         await websocket_send(
+             json.dumps({"type": "error", "message": f"Conversation error: {str(e)}"})
+         )
++        if bridge is not None and turn_id is not None:
++            bridge.finish_turn(turn_id, error=str(e))
+         raise
+     finally:
+         cleanup_conversation(tts_manager, session_emoji)
++
++
++def _turn_source(metadata: Optional[Dict[str, Any]]):
++    """Map upstream metadata onto an Aemeath event source."""
++    from aemeath.interfaces import EventSource
++
++    if metadata and metadata.get("proactive_speak"):
++        return EventSource.PROACTIVE
++    return EventSource.USER_TEXT
+diff --git a/src/open_llm_vtuber/conversations/tts_manager.py b/src/open_llm_vtuber/conversations/tts_manager.py
+index 59c36b7..dee308f 100644
+--- a/src/open_llm_vtuber/conversations/tts_manager.py
++++ b/src/open_llm_vtuber/conversations/tts_manager.py
+@@ -3,7 +3,7 @@ import json
+ import re
+ import uuid
+ from datetime import datetime
+-from typing import List, Optional, Dict
++from typing import Any, List, Optional, Dict
+ from loguru import logger
+ 
+ from ..agent.output_types import DisplayText, Actions
+@@ -26,6 +26,15 @@ class TTSTaskManager:
+         # Counter for maintaining order
+         self._sequence_counter = 0
+         self._next_sequence_to_send = 0
++        # Aemeath: when set, audio for a cancelled turn is discarded instead of
++        # being sent, and payloads carry turn/slice ids for the client.
++        self._bridge: Optional[Any] = None
++        self._turn_id: Optional[str] = None
++
++    def bind_turn(self, bridge: Any, turn_id: str) -> None:
++        """Route audio through the Aemeath bridge for this turn."""
++        self._bridge = bridge
++        self._turn_id = turn_id
+ 
+     async def speak(
+         self,
+@@ -35,6 +44,8 @@ class TTSTaskManager:
+         live2d_model: Live2dModel,
+         tts_engine: TTSInterface,
+         websocket_send: WebSocketSend,
++        bridge: Optional[Any] = None,
++        turn_id: Optional[str] = None,
+     ) -> None:
+         """
+         Queue a TTS task while maintaining order of delivery.
+@@ -46,7 +57,12 @@ class TTSTaskManager:
+             live2d_model: Live2D model instance
+             tts_engine: TTS engine instance
+             websocket_send: WebSocket send function
++            bridge: Optional Aemeath bridge used to tag and gate output.
++            turn_id: Turn this audio belongs to, when a bridge is supplied.
+         """
++        if bridge is not None and turn_id is not None:
++            self.bind_turn(bridge, turn_id)
++
+         if len(re.sub(r'[\s.,!?，。！？\'"』」）】\s]+', "", tts_text)) == 0:
+             logger.debug("Empty TTS text, sending silent display payload")
+             # Get current sequence number for silent payload
+@@ -105,7 +121,7 @@ class TTSTaskManager:
+                 # Send payloads in order
+                 while self._next_sequence_to_send in buffered_payloads:
+                     next_payload = buffered_payloads.pop(self._next_sequence_to_send)
+-                    await websocket_send(json.dumps(next_payload))
++                    await self._deliver(next_payload, websocket_send)
+                     self._next_sequence_to_send += 1
+ 
+                 self._payload_queue.task_done()
+@@ -113,6 +129,33 @@ class TTSTaskManager:
+             except asyncio.CancelledError:
+                 break
+ 
++    async def _deliver(self, payload: Dict, websocket_send: WebSocketSend) -> None:
++        """Send one audio payload, dropping it when it is no longer valid.
++
++        This is the last point before the bytes leave the backend, so it is
++        where "the user switched to class mode while this was being
++        synthesised" and "this turn was cancelled two seconds ago" are caught.
++        Late audio must be discarded here even when the TTS request itself
++        could not be cancelled in time.
++        """
++        bridge = self._bridge
++        turn_id = self._turn_id
++
++        if bridge is not None and turn_id is not None:
++            if not bridge.may_send_audio(turn_id):
++                logger.info(
++                    "Discarding late audio for turn {} (cancelled or muted).",
++                    turn_id,
++                )
++                return
++
++            slice_id = await bridge.send_audio_payload(turn_id, payload)
++            if slice_id is None:
++                return
++            return
++
++        await websocket_send(json.dumps(payload))
++
+     async def _send_silent_payload(
+         self,
+         display_text: DisplayText,
+diff --git a/src/open_llm_vtuber/service_context.py b/src/open_llm_vtuber/service_context.py
+index e73dd4a..345a1a0 100644
+--- a/src/open_llm_vtuber/service_context.py
++++ b/src/open_llm_vtuber/service_context.py
+@@ -72,6 +72,12 @@ class ServiceContext:
+         self.send_text: Callable = None
+         self.client_uid: str = None
+ 
++        # Aemeath's bridge, when the Aemeath agent is selected. It is the only
++        # path through which character output is produced for that agent; for
++        # every other agent it stays None and upstream behaves as before.
++        # See docs/patches/0003-bridge-aemeath-runtime.patch.
++        self.aemeath_bridge = None
++
+     def __str__(self):
+         return (
+             f"ServiceContext:\n"
+@@ -396,6 +402,22 @@ class ServiceContext:
+             logger.debug(f"Agent choice: {agent_config.conversation_agent_choice}")
+             logger.debug(f"System prompt: {system_prompt}")
+ 
++            # Attach the Aemeath bridge for this session so the WebSocket layer
++            # (and later patches to the conversation path) can find it. For any
++            # other agent the attribute stays None.
++            if agent_config.conversation_agent_choice == "aemeath_agent":
++                try:
++                    from aemeath.runtime import get_runtime
++
++                    self.aemeath_bridge = get_runtime().bridge
++                    self._install_aemeath_proactive_generator()
++                    logger.info("Aemeath bridge attached to service context.")
++                except Exception as exc:
++                    logger.error("Could not attach Aemeath bridge: {}", exc)
++                    raise
++            else:
++                self.aemeath_bridge = None
++
+             # Save the current configuration
+             self.character_config.agent_config = agent_config
+             self.system_prompt = system_prompt
+@@ -404,6 +426,64 @@ class ServiceContext:
+             logger.error(f"Failed to initialize agent: {e}")
+             raise
+ 
++    def _install_aemeath_proactive_generator(self) -> None:
++        """Give the Aemeath bridge a way to produce a proactive candidate.
++
++        The bridge decides *whether* Aemeath may speak; this supplies *what*
++        she says, using the same agent and system prompt as a normal reply. It
++        is installed here because this is the only place that holds both the
++        bridge and the initialized agent.
++
++        Without this the scheduler had no generator, so ``run_proactive`` was
++        only ever called by tests and the backend could never start a topic on
++        its own.
++        """
++        bridge = self.aemeath_bridge
++        agent = self.agent_engine
++        if bridge is None or agent is None:
++            return
++
++        # Imported lazily: these are the same input types a normal turn uses.
++        from open_llm_vtuber.agent.input_types import (
++            BatchInput,
++            TextData,
++            TextSource,
++        )
++
++        async def _generate(is_startup: bool) -> str:
++            """Generate one proactive candidate through the real agent."""
++            prompt = await self._aemeath_proactive_prompt(is_startup)
++            batch = BatchInput(
++                texts=[TextData(source=TextSource.INPUT, content=prompt)],
++                metadata={"proactive_speak": True},
++            )
++            parts: list = []
++            async for item in agent.chat(batch):
++                text = getattr(getattr(item, "display_text", None), "text", None)
++                if text:
++                    parts.append(text)
++            return "".join(parts).strip()
++
++        bridge.set_proactive_generator(_generate)
++        logger.info("Aemeath proactive generator installed.")
++
++    async def _aemeath_proactive_prompt(self, is_startup: bool) -> str:
++        """Load the prompt that asks Aemeath to start a topic."""
++        name = "startup_greeting_prompt" if is_startup else "proactive_speak_prompt"
++        try:
++            from prompts import prompt_loader
++
++            prompt_file = self.system_config.tool_prompts.get(name)
++            if not prompt_file:
++                prompt_file = self.system_config.tool_prompts.get(
++                    "proactive_speak_prompt"
++                )
++            if prompt_file:
++                return prompt_loader.load_util(prompt_file)
++        except Exception as exc:
++            logger.warning("Could not load proactive prompt '{}': {}", name, exc)
++        return "Please say something."
++
+     def init_translate(self, translator_config: TranslatorConfig) -> None:
+         """Initialize or update the translation engine based on the configuration."""
+ 
+diff --git a/src/open_llm_vtuber/websocket_handler.py b/src/open_llm_vtuber/websocket_handler.py
+index 41368a6..f836b09 100644
+--- a/src/open_llm_vtuber/websocket_handler.py
++++ b/src/open_llm_vtuber/websocket_handler.py
+@@ -43,6 +43,19 @@ class MessageType(Enum):
+     CONFIG = ["fetch-configs", "switch-config"]
+     CONTROL = ["interrupt-signal", "audio-play-start"]
+     DATA = ["mic-audio-data"]
++    # Aemeath protocol extensions; see docs/patches/0003.
++    AEMEATH = [
++        "aemeath-hello",
++        "aemeath-set-mode",
++        "aemeath-set-switch",
++        "aemeath-screen-request",
++        "aemeath-activity",
++        "aemeath-display-receipt",
++        "aemeath-playback-receipt",
++        "aemeath-cancel-receipt",
++        "aemeath-memory-query",
++        "aemeath-import-legacy-history",
++    ]
+ 
+ 
+ class WSMessage(TypedDict, total=False):
+@@ -88,13 +101,28 @@ class WebSocketHandler:
+             "mic-audio-end": self._handle_conversation_trigger,
+             "raw-audio-data": self._handle_raw_audio_data,
+             "text-input": self._handle_conversation_trigger,
+-            "ai-speak-signal": self._handle_conversation_trigger,
++            # Aemeath: the client signal only *requests* a proactive check. It
++            # must not start a conversation itself, or the backend scheduler
++            # would stop being the single source of proactive turns. The
++            # handler falls back to upstream behaviour for other agents.
++            "ai-speak-signal": self._handle_ai_speak_signal,
+             "fetch-configs": self._handle_fetch_configs,
+             "switch-config": self._handle_config_switch,
+             "fetch-backgrounds": self._handle_fetch_backgrounds,
+             "audio-play-start": self._handle_audio_play_start,
+             "request-init-config": self._handle_init_config_request,
+             "heartbeat": self._handle_heartbeat,
++            # Aemeath protocol; see docs/patches/0003.
++            "aemeath-hello": self._handle_aemeath_hello,
++            "aemeath-set-mode": self._handle_aemeath_set_mode,
++            "aemeath-set-switch": self._handle_aemeath_set_switch,
++            "aemeath-screen-request": self._handle_aemeath_screen_request,
++            "aemeath-activity": self._handle_aemeath_activity,
++            "aemeath-display-receipt": self._handle_aemeath_display_receipt,
++            "aemeath-playback-receipt": self._handle_aemeath_playback_receipt,
++            "aemeath-cancel-receipt": self._handle_aemeath_cancel_receipt,
++            "aemeath-memory-query": self._handle_aemeath_memory_query,
++            "aemeath-import-legacy-history": self._handle_aemeath_import_legacy,
+         }
+ 
+     async def handle_new_connection(
+@@ -119,10 +147,19 @@ class WebSocketHandler:
+                 websocket, client_uid, session_service_context
+             )
+ 
++            # Hand the connection to Aemeath before any output is produced, so
++            # the bridge is the only thing that can send character output.
++            await self._attach_aemeath_client(websocket, client_uid)
++
+             await self._send_initial_messages(
+                 websocket, client_uid, session_service_context
+             )
+ 
++            # The startup greeting is attempted once per session, after the
++            # client can actually receive it. The scheduler still decides
++            # whether it is allowed; this only supplies the moment.
++            await self._maybe_aemeath_startup_greeting(client_uid)
++
+             logger.info(f"Connection established for client {client_uid}")
+ 
+         except Exception as e:
+@@ -146,6 +183,43 @@ class WebSocketHandler:
+         self.chat_group_manager.client_group_map[client_uid] = ""
+         await self.send_group_update(websocket, client_uid)
+ 
++    async def _attach_aemeath_client(
++        self, websocket: WebSocket, client_uid: str
++    ) -> None:
++        """Hand a new connection to the Aemeath bridge, taking over the session.
++
++        Only one Aemeath client may be active. Attaching a new one supersedes
++        the previous connection: its turns are cancelled and its sender stops
++        being the bridge's target, so a stale window cannot keep driving the
++        character or receive output meant for the new one.
++        """
++        bridge = self._aemeath_bridge(client_uid)
++        if bridge is None:
++            return
++
++        session = bridge.attach_client(
++            websocket.send_text, client_uid=client_uid
++        )
++        logger.info(
++            "Aemeath bridge attached for {} (generation {}).",
++            client_uid,
++            session.generation,
++        )
++
++    async def _maybe_aemeath_startup_greeting(self, client_uid: str) -> None:
++        """Attempt the one-shot startup greeting for an Aemeath client.
++
++        A failure here must never break the connection: the greeting is an
++        optional nicety, and losing it is far better than dropping the session.
++        """
++        bridge = self._aemeath_bridge(client_uid)
++        if bridge is None:
++            return
++        try:
++            await bridge.maybe_startup_greeting()
++        except Exception as exc:
++            logger.error("Startup greeting failed: {}", exc)
++
+     async def _send_initial_messages(
+         self,
+         websocket: WebSocket,
+@@ -199,6 +273,13 @@ class WebSocketHandler:
+             send_text=send_text,
+             client_uid=client_uid,
+         )
++        # The Aemeath bridge is process-wide (one coordinator, one situation,
++        # one memory), so every session context references the same object.
++        # Without this the cloned context would have no bridge and Aemeath
++        # output would bypass its own arbitration.
++        session_service_context.aemeath_bridge = (
++            self.default_context_cache.aemeath_bridge
++        )
+         return session_service_context
+ 
+     async def handle_websocket_communication(
+@@ -279,6 +360,12 @@ class WebSocketHandler:
+ 
+     async def handle_disconnect(self, client_uid: str) -> None:
+         """Handle client disconnection"""
++        # Detach from Aemeath first so no further output is produced for a
++        # connection that is going away.
++        bridge = self._aemeath_bridge(client_uid)
++        if bridge is not None:
++            bridge.detach_client(client_uid=client_uid)
++
+         group = self.chat_group_manager.get_client_group(client_uid)
+         if group:
+             await handle_group_interrupt(
+@@ -394,8 +481,21 @@ class WebSocketHandler:
+     async def _handle_history_list_request(
+         self, websocket: WebSocket, client_uid: str, data: WSMessage
+     ) -> None:
+-        """Handle request for chat history list"""
++        """Handle request for chat history list.
++
++        For the Aemeath agent the authoritative source is the Aemeath SQLite
++        database, not upstream's JSON history. Other agents keep upstream's
++        JSON history unchanged.
++        """
+         context = self.client_contexts[client_uid]
++        bridge = self._aemeath_bridge(client_uid)
++        if bridge is not None:
++            histories = bridge.list_histories()
++            await websocket.send_text(
++                json.dumps({"type": "history-list", "histories": histories})
++            )
++            return
++
+         histories = get_history_list(context.character_config.conf_uid)
+         await websocket.send_text(
+             json.dumps({"type": "history-list", "histories": histories})
+@@ -404,14 +504,30 @@ class WebSocketHandler:
+     async def _handle_fetch_history(
+         self, websocket: WebSocket, client_uid: str, data: dict
+     ):
+-        """Handle fetching and setting specific chat history"""
++        """Handle fetching and setting specific chat history."""
+         history_uid = data.get("history_uid")
+         if not history_uid:
+             return
+ 
+         context = self.client_contexts[client_uid]
++        bridge = self._aemeath_bridge(client_uid)
++
+         # Update history_uid in service context
+         context.history_uid = history_uid
++
++        if bridge is not None:
++            # Aemeath's history lives in SQLite; read it from there and restore
++            # the agent's working context from the same authoritative source.
++            messages = bridge.load_history(history_uid)
++            context.agent_engine.set_memory_from_history(
++                conf_uid=context.character_config.conf_uid,
++                history_uid=history_uid,
++            )
++            await websocket.send_text(
++                json.dumps({"type": "history-data", "messages": messages})
++            )
++            return
++
+         context.agent_engine.set_memory_from_history(
+             conf_uid=context.character_config.conf_uid,
+             history_uid=history_uid,
+@@ -432,8 +548,27 @@ class WebSocketHandler:
+     async def _handle_create_history(
+         self, websocket: WebSocket, client_uid: str, data: WSMessage
+     ) -> None:
+-        """Handle creation of new chat history"""
++        """Handle creation of new chat history."""
+         context = self.client_contexts[client_uid]
++        bridge = self._aemeath_bridge(client_uid)
++
++        if bridge is not None:
++            history_uid = bridge.create_history()
++            context.history_uid = history_uid
++            context.agent_engine.set_memory_from_history(
++                conf_uid=context.character_config.conf_uid,
++                history_uid=history_uid,
++            )
++            await websocket.send_text(
++                json.dumps(
++                    {
++                        "type": "new-history-created",
++                        "history_uid": history_uid,
++                    }
++                )
++            )
++            return
++
+         history_uid = create_new_history(context.character_config.conf_uid)
+         if history_uid:
+             context.history_uid = history_uid
+@@ -453,16 +588,22 @@ class WebSocketHandler:
+     async def _handle_delete_history(
+         self, websocket: WebSocket, client_uid: str, data: dict
+     ):
+-        """Handle deletion of chat history"""
++        """Handle deletion of chat history."""
+         history_uid = data.get("history_uid")
+         if not history_uid:
+             return
+ 
+         context = self.client_contexts[client_uid]
+-        success = delete_history(
+-            context.character_config.conf_uid,
+-            history_uid,
+-        )
++        bridge = self._aemeath_bridge(client_uid)
++
++        if bridge is not None:
++            success = bridge.delete_history(history_uid)
++        else:
++            success = delete_history(
++                context.character_config.conf_uid,
++                history_uid,
++            )
++
+         await websocket.send_text(
+             json.dumps(
+                 {
+@@ -610,3 +751,249 @@ class WebSocketHandler:
+             await websocket.send_json({"type": "heartbeat-ack"})
+         except Exception as e:
+             logger.error(f"Error sending heartbeat acknowledgment: {e}")
++
++    # ------------------------------------------------------------------
++    # Aemeath protocol handlers
++    #
++    # These are the only entry points through which an Aemeath client drives
++    # the character. They all delegate to the bridge so that turn arbitration,
++    # situation changes and output permission stay in one place. See
++    # docs/patches/0003-bridge-aemeath-runtime.patch.
++    # ------------------------------------------------------------------
++
++    def _aemeath_bridge(self, client_uid: str):
++        """Return the Aemeath bridge for a client, or ``None`` for other agents.
++
++        Non-Aemeath agents keep upstream's original behaviour: the bridge is
++        only present when the Aemeath agent created it.
++        """
++        context = self.client_contexts.get(client_uid)
++        if context is None:
++            return None
++        return getattr(context, "aemeath_bridge", None)
++
++    async def _handle_ai_speak_signal(
++        self, websocket: WebSocket, client_uid: str, data: WSMessage
++    ) -> None:
++        """Ask Aemeath whether a proactive message is allowed right now.
++
++        For the Aemeath agent this never starts a conversation directly: the
++        backend scheduler is the single source of proactive turns, so the
++        request is handed to the bridge, which applies every eligibility rule
++        and only then generates. Other agents keep upstream's original path.
++        """
++        bridge = self._aemeath_bridge(client_uid)
++        if bridge is None:
++            await self._handle_conversation_trigger(websocket, client_uid, data)
++            return
++        await bridge.request_proactive()
++
++    async def _handle_aemeath_hello(
++        self, websocket: WebSocket, client_uid: str, data: WSMessage
++    ) -> None:
++        """Negotiate protocol version and hand the client its initial state."""
++        bridge = self._aemeath_bridge(client_uid)
++        if bridge is None:
++            await websocket.send_text(
++                json.dumps(
++                    {
++                        "type": "aemeath-unavailable",
++                        "message": "this backend is not running the Aemeath agent",
++                    }
++                )
++            )
++            return
++
++        requested = int(data.get("protocol_version") or 0)
++        capabilities = data.get("capabilities") or []
++
++        from aemeath.bridge import PROTOCOL_VERSION
++
++        supported = min(requested, PROTOCOL_VERSION) if requested else 0
++        # A client that does not negotiate the Aemeath protocol is explicitly
++        # not treated as a full Aemeath client.
++        accepted = requested >= PROTOCOL_VERSION
++
++        await websocket.send_text(
++            json.dumps(
++                {
++                    "type": "aemeath-hello-ack",
++                    "protocol_version": PROTOCOL_VERSION,
++                    "negotiated_version": supported,
++                    "accepted": accepted,
++                    "capabilities": capabilities,
++                    "state": bridge.state_payload(),
++                }
++            )
++        )
++        if not accepted:
++            logger.warning(
++                "Client {} negotiated protocol {} (< {}); running in reduced mode.",
++                client_uid,
++                supported,
++                PROTOCOL_VERSION,
++            )
++
++    async def _handle_aemeath_set_mode(
++        self, websocket: WebSocket, client_uid: str, data: WSMessage
++    ) -> None:
++        """Switch conversation mode through the ordered bridge path."""
++        bridge = self._aemeath_bridge(client_uid)
++        if bridge is None:
++            return
++
++        from aemeath.interfaces import SpeechMode
++
++        raw = str(data.get("mode") or "").strip()
++        try:
++            mode = SpeechMode(raw)
++        except ValueError:
++            await websocket.send_text(
++                json.dumps({"type": "error", "message": f"unknown mode: {raw}"})
++            )
++            return
++
++        await bridge.switch_mode(mode)
++
++    async def _handle_aemeath_set_switch(
++        self, websocket: WebSocket, client_uid: str, data: WSMessage
++    ) -> None:
++        """Toggle microphone, screen observation or proactive chat."""
++        bridge = self._aemeath_bridge(client_uid)
++        if bridge is None:
++            return
++
++        name = str(data.get("switch") or "")
++        try:
++            await bridge.set_switch(name, bool(data.get("enabled")))
++        except ValueError as exc:
++            await websocket.send_text(
++                json.dumps({"type": "error", "message": str(exc)})
++            )
++
++    async def _handle_aemeath_screen_request(
++        self, websocket: WebSocket, client_uid: str, data: WSMessage
++    ) -> None:
++        """Handle a manual "look at my screen" request."""
++        bridge = self._aemeath_bridge(client_uid)
++        if bridge is None:
++            return
++        await bridge.on_screen_request(force=bool(data.get("force", True)))
++
++    async def _handle_aemeath_activity(
++        self, websocket: WebSocket, client_uid: str, data: WSMessage
++    ) -> None:
++        """Record whether the user is typing or speaking right now."""
++        bridge = self._aemeath_bridge(client_uid)
++        if bridge is None:
++            return
++        await bridge.on_client_activity(
++            typing=bool(data.get("typing")),
++            voice_active=bool(data.get("voice_active")),
++        )
++
++    async def _handle_aemeath_display_receipt(
++        self, websocket: WebSocket, client_uid: str, data: WSMessage
++    ) -> None:
++        """Handle the client confirming text was actually displayed."""
++        bridge = self._aemeath_bridge(client_uid)
++        if bridge is None:
++            return
++        turn_id = str(data.get("turn_id") or "")
++        if not turn_id:
++            return
++        await bridge.on_display_receipt(turn_id=turn_id)
++        await bridge.on_display_text_shown(
++            turn_id=turn_id, client_elapsed_ms=data.get("client_elapsed_ms")
++        )
++
++    async def _handle_aemeath_playback_receipt(
++        self, websocket: WebSocket, client_uid: str, data: WSMessage
++    ) -> None:
++        """Handle the client confirming a slice started or finished playing."""
++        bridge = self._aemeath_bridge(client_uid)
++        if bridge is None:
++            return
++        turn_id = str(data.get("turn_id") or "")
++        slice_id = str(data.get("audio_slice_id") or "")
++        if not turn_id:
++            return
++        elapsed = data.get("client_elapsed_ms")
++        if data.get("phase") == "finished":
++            await bridge.on_playback_finished(
++                turn_id=turn_id, audio_slice_id=slice_id, client_elapsed_ms=elapsed
++            )
++        else:
++            await bridge.on_playback_started(
++                turn_id=turn_id, audio_slice_id=slice_id, client_elapsed_ms=elapsed
++            )
++
++    async def _handle_aemeath_cancel_receipt(
++        self, websocket: WebSocket, client_uid: str, data: WSMessage
++    ) -> None:
++        """Handle the client confirming playback has fully stopped."""
++        bridge = self._aemeath_bridge(client_uid)
++        if bridge is None:
++            return
++        turn_id = str(data.get("turn_id") or "")
++        if turn_id:
++            await bridge.on_cancel_complete(
++                turn_id=turn_id, client_elapsed_ms=data.get("client_elapsed_ms")
++            )
++
++    async def _handle_aemeath_memory_query(
++        self, websocket: WebSocket, client_uid: str, data: WSMessage
++    ) -> None:
++        """Serve the memory-management screen from the authoritative database."""
++        bridge = self._aemeath_bridge(client_uid)
++        if bridge is None:
++            return
++
++        store = bridge.memory_store
++        action = str(data.get("action") or "list")
++
++        if action == "search":
++            items = store.list_memories(query=str(data.get("query") or ""))
++        elif action == "forget":
++            outcome = store.forget(
++                str(data.get("memory_id") or ""),
++                fragments=data.get("fragments"),
++            )
++            await websocket.send_text(
++                json.dumps({"type": "aemeath-memory-forget-result", **outcome})
++            )
++            return
++        else:
++            items = store.list_memories()
++
++        await websocket.send_text(
++            json.dumps(
++                {
++                    "type": "aemeath-memory-list",
++                    "memories": [
++                        {
++                            "memory_id": item.memory_id,
++                            "kind": item.kind,
++                            "content": item.content,
++                            "created_at": item.created_at,
++                            "source_message_ids": list(
++                                store.evidence_for(item.memory_id)
++                            ),
++                        }
++                        for item in items
++                    ],
++                }
++            )
++        )
++
++    async def _handle_aemeath_import_legacy(
++        self, websocket: WebSocket, client_uid: str, data: WSMessage
++    ) -> None:
++        """Run the one-off, idempotent import of legacy JSON history."""
++        bridge = self._aemeath_bridge(client_uid)
++        if bridge is None:
++            return
++        result = await bridge.import_legacy_history()
++        await websocket.send_text(
++            json.dumps({"type": "aemeath-import-result", **result})
++        )

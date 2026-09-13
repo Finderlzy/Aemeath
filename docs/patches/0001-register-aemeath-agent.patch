@@ -1,0 +1,83 @@
+diff --git a/src/open_llm_vtuber/agent/agent_factory.py b/src/open_llm_vtuber/agent/agent_factory.py
+index 4892a23..dea5b18 100644
+--- a/src/open_llm_vtuber/agent/agent_factory.py
++++ b/src/open_llm_vtuber/agent/agent_factory.py
+@@ -128,5 +128,78 @@ class AgentFactory:
+                 port=settings.get("port"),
+             )
+ 
++        elif conversation_agent_choice == "aemeath_agent":
++            # Aemeath's own conversation agent. Imported lazily so that
++            # upstream keeps working standalone when this agent is not selected.
++            from aemeath.agent import AemeathAgent
++
++            settings = agent_settings.get("aemeath_agent", {})
++            llm_provider = settings.get("llm_provider")
++            if not llm_provider:
++                raise ValueError("LLM provider not specified for aemeath_agent")
++
++            llm_config = dict(llm_configs.get(llm_provider) or {})
++            if not llm_config:
++                raise ValueError(
++                    f"Configuration not found for LLM provider: {llm_provider}"
++                )
++            interrupt_method = llm_config.pop("interrupt_method", "user")
++
++            llm = StatelessLLMFactory.create_llm(
++                llm_provider=llm_provider, system_prompt=system_prompt, **llm_config
++            )
++
++            aemeath_config = kwargs.get("aemeath_config")
++            if aemeath_config is None:
++                # Resolve the Aemeath block from the same config file upstream
++                # just read, so the runtime and the agent never disagree.
++                from aemeath.config import load_config
++
++                try:
++                    aemeath_config = load_config()
++                except Exception as exc:
++                    logger.error("Could not load Aemeath configuration: {}", exc)
++
++            # The runtime is mandatory for this agent: it owns the situation
++            # state, the local memory and the bridge. A failure here is
++            # surfaced rather than silently producing an agent with no memory,
++            # because that would look like working software while quietly
++            # forgetting everything the user says.
++            from aemeath.runtime import get_runtime
++
++            runtime = get_runtime(config=aemeath_config)
++
++            # Start the runtime's background workers (memory extraction and the
++            # proactive timer). Without this the tasks were only ever started by
++            # tests, so extraction and self-initiated conversation never ran in
++            # the real server: memory stayed empty and Aemeath never spoke
++            # first. Scheduled on the running loop when there is one, and
++            # skipped when the factory is called outside a loop (tests build the
++            # runtime themselves).
++            try:
++                import asyncio
++
++                loop = asyncio.get_running_loop()
++                loop.create_task(runtime.start())
++            except RuntimeError:
++                logger.debug(
++                    "No running event loop; Aemeath background tasks not started."
++                )
++
++            return AemeathAgent(
++                llm=llm,
++                system=system_prompt,
++                live2d_model=live2d_model,
++                tts_preprocessor_config=tts_preprocessor_config,
++                faster_first_response=settings.get("faster_first_response", True),
++                segment_method=settings.get("segment_method", "pysbd"),
++                interrupt_method=interrupt_method,
++                # The manager, not a snapshot of the state: the agent re-reads
++                # the current state on every turn.
++                situation=runtime.situation,
++                memory=runtime.memory,
++                config=aemeath_config,
++            )
++
+         else:
+             raise ValueError(f"Unsupported agent type: {conversation_agent_choice}")

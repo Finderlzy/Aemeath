@@ -1,0 +1,37 @@
+# Aemeath 首期补装依赖
+#
+# 上游 uv.lock 未包含这些包，或版本与锁定的 torch 不兼容。
+# 在 `uv sync --frozen --python 3.11` 之后执行：
+#
+#     uv pip install -r requirements.aemeath.txt
+#
+# 版本为 2026-09-11 实测通过的值。
+
+# --- 运行时必需 ---
+
+# 上游 src/open_llm_vtuber/vad/silero.py 导入此包，但它不在上游 uv.lock 中。
+# 不装会导致启动失败：No module named 'silero_vad'
+silero-vad==6.2.1
+
+# silero-vad 默认会拉 torchaudio 2.11.x，与锁定的 torch 2.6.0 ABI 不兼容，
+# 导入时报 OSError: [WinError 127]。必须固定到与 torch 一致的 2.6.0。
+# 该版本需从 PyTorch 索引获取：
+#   uv pip install "torchaudio==2.6.0" \
+#       --index-url https://download.pytorch.org/whl/cpu \
+#       --extra-index-url https://pypi.org/simple
+torchaudio==2.6.0
+
+# 屏幕截图缩放（screen.py 的 _downscale）需要；缺失时降级为不缩放而非失败。
+pillow==12.3.0
+
+# --- 屏幕捕获（真实截图验收需要） ---
+
+# 上游未把捕获依赖列入 uv.lock。缺少时 capture 能力状态为 error 并给出原因
+# （见 AdapterFactory.build_capture），屏幕观察整体不可用。2026-09-14 实测可用。
+mss==10.1.0
+pygetwindow==0.0.9
+
+# --- 开发与测试 ---
+
+pytest==9.1.1
+pytest-asyncio==1.4.0

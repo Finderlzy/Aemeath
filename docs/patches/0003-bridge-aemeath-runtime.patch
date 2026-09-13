@@ -305,7 +305,7 @@ index 59c36b7..dee308f 100644
          self,
          display_text: DisplayText,
 diff --git a/src/open_llm_vtuber/service_context.py b/src/open_llm_vtuber/service_context.py
-index e73dd4a..345a1a0 100644
+index e73dd4a..d4f3c88 100644
 --- a/src/open_llm_vtuber/service_context.py
 +++ b/src/open_llm_vtuber/service_context.py
 @@ -72,6 +72,12 @@ class ServiceContext:
@@ -321,7 +321,21 @@ index e73dd4a..345a1a0 100644
      def __str__(self):
          return (
              f"ServiceContext:\n"
-@@ -396,6 +402,22 @@ class ServiceContext:
+@@ -344,6 +350,13 @@ class ServiceContext:
+         else:
+             logger.info("TTS already initialized with the same config.")
+ 
++        # Aemeath's proactive messages have no conversation loop to drive this
++        # engine, so the bridge holds it directly. Without this the proactive
++        # path could only send display text and an empty audio frame, which is
++        # what made self-initiated messages inaudible.
++        if self.aemeath_bridge is not None:
++            self.aemeath_bridge.attach_tts_engine(self.tts_engine)
++
+     def init_vad(self, vad_config: VADConfig) -> None:
+         if vad_config.vad_model is None:
+             logger.info("VAD is disabled.")
+@@ -396,6 +409,26 @@ class ServiceContext:
              logger.debug(f"Agent choice: {agent_config.conversation_agent_choice}")
              logger.debug(f"System prompt: {system_prompt}")
  
@@ -333,6 +347,10 @@ index e73dd4a..345a1a0 100644
 +                    from aemeath.runtime import get_runtime
 +
 +                    self.aemeath_bridge = get_runtime().bridge
++                    # The bridge is process-wide while the TTS engine belongs to
++                    # this session, so the engine is (re)attached here as well as
++                    # in init_tts; whichever runs last wins.
++                    self.aemeath_bridge.attach_tts_engine(self.tts_engine)
 +                    self._install_aemeath_proactive_generator()
 +                    logger.info("Aemeath bridge attached to service context.")
 +                except Exception as exc:
@@ -344,7 +362,7 @@ index e73dd4a..345a1a0 100644
              # Save the current configuration
              self.character_config.agent_config = agent_config
              self.system_prompt = system_prompt
-@@ -404,6 +426,64 @@ class ServiceContext:
+@@ -404,6 +437,69 @@ class ServiceContext:
              logger.error(f"Failed to initialize agent: {e}")
              raise
  
@@ -366,7 +384,12 @@ index e73dd4a..345a1a0 100644
 +            return
 +
 +        # Imported lazily: these are the same input types a normal turn uses.
-+        from open_llm_vtuber.agent.input_types import (
++        # They must come from the *same* module path the server itself loaded
++        # them under (``src.open_llm_vtuber.*``). Importing the bare
++        # ``open_llm_vtuber.*`` also resolves, because ``src/`` is on sys.path,
++        # but it executes the same file a second time and produces a second
++        # ``BatchInput`` class that the agent pipeline does not recognise.
++        from src.open_llm_vtuber.agent.input_types import (
 +            BatchInput,
 +            TextData,
 +            TextSource,

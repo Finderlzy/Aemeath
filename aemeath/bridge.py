@@ -41,6 +41,8 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from loguru import logger
 
+from src.open_llm_vtuber.utils.stream_audio import prepare_audio_payload
+
 from .interfaces import EventSource, SituationState, SpeechMode, TurnId
 
 #: Protocol version this bridge speaks. A client that does not negotiate at
@@ -89,14 +91,27 @@ class AemeathBridge:
     """Routes every desktop event into Aemeath and every output back out."""
 
     def __init__(self, *, coordinator, situation, memory=None, screen=None,
-                 metrics=None, config=None) -> None:
-        """Wire the bridge to the Aemeath modules it fronts."""
+                 metrics=None, config=None, tts_engine=None) -> None:
+        """Wire the bridge to the Aemeath modules it fronts.
+
+        Args:
+            coordinator: Turn and output arbitration.
+            situation: Situation state.
+            memory: Local history and memory service.
+            screen: Screen observer, when capture and vision are configured.
+            metrics: Per-turn metrics recorder.
+            config: Resolved Aemeath configuration.
+            tts_engine: Upstream TTS engine used to voice proactive messages.
+                Attached later by ``ServiceContext``, because the bridge is
+                built before the engine is resolved.
+        """
         self._coordinator = coordinator
         self._situation = situation
         self._memory = memory
         self._screen = screen
         self._metrics = metrics
         self._config = config
+        self._tts_engine = tts_engine
 
         self._session: Optional[ClientSession] = None
         self._generation = 0
@@ -559,6 +574,36 @@ class AemeathBridge:
         """
         self._proactive_generate = generate
 
+    def attach_coordinator(self, coordinator) -> None:
+        """Complete the bridge/coordinator wiring.
+
+        The two are mutually dependent: the coordinator owns *whether* output
+        may go out, and its output hooks are the bridge's own methods. The
+        bridge is therefore constructed first and given its coordinator here,
+        rather than reaching into the attribute from outside.
+
+        Args:
+            coordinator: The :class:`EventCoordinator` for this process.
+        """
+        self._coordinator = coordinator
+
+    def attach_tts_engine(self, engine) -> None:
+        """Attach the TTS engine used to voice self-initiated messages.
+
+        Upstream's own synthesis path is driven by the conversation loop, which
+        only runs for a user turn. A proactive message has no such loop, so the
+        bridge drives the same engine itself; without this the proactive path
+        could only send display text and an empty audio frame.
+
+        Args:
+            engine: An upstream ``TTSInterface`` implementation, or ``None``.
+        """
+        self._tts_engine = engine
+        logger.info(
+            "TTS engine attached to the Aemeath bridge ({})",
+            type(engine).__name__ if engine is not None else "none",
+        )
+
     async def run_proactive(self, *, is_startup: bool = False) -> Optional[str]:
         """Let the scheduler decide, then generate and deliver one message.
 
@@ -581,14 +626,19 @@ class AemeathBridge:
             return await generate(is_startup)
 
         message = await self._coordinator.run_proactive(
-            _candidate, is_startup=is_startup
+            _candidate, is_startup=is_startup, turn_id=TurnId(turn_id)
         )
         if not message:
             return None
 
         # Delivery re-checks the situation and holds the receipt placeholder.
         delivered = await self.deliver_proactive(message, turn_id=turn_id)
-        return message if delivered else None
+        if not delivered:
+            return None
+        # The greeting is one-shot for the session once it has actually gone
+        # out; it is not repeated on every reconnect.
+        self._coordinator.mark_proactive_greeted(is_startup=is_startup)
+        return message
 
     async def maybe_startup_greeting(self) -> Optional[str]:
         """Attempt the one-shot startup greeting.
@@ -608,8 +658,26 @@ class AemeathBridge:
     async def deliver_proactive(self, text: str, *, turn_id: str) -> bool:
         """Send a proactive candidate and hold a placeholder for its receipt.
 
-        The message is not counted as sent until the client confirms display;
-        until then a placeholder prevents a duplicate candidate.
+        The text goes out first and is independent of audio, so classroom mode
+        still shows the message. Audio then reuses the ordinary reply path —
+        the coordinator re-checks that the turn is current and that the
+        situation still permits voice, and :meth:`on_speak` synthesises it with
+        the configured engine. Synthesising here rather than sending an empty
+        audio frame is what makes a proactive message audible (A01): the old
+        code called ``send_audio(turn_id, "")`` and the client received a
+        silent placeholder.
+
+        Delivery is *attempted* here but never *counted* here. The message is
+        recorded as sent only when the client confirms it was displayed, so an
+        unshown message cannot consume the proactive budget.
+
+        Args:
+            text: The candidate to display and, when allowed, speak.
+            turn_id: The turn this candidate belongs to.
+
+        Returns:
+            ``True`` when the message was produced, ``False`` when it was
+            declined or the turn had already been superseded.
         """
         if not text or "[SILENCE]" in text:
             return False
@@ -617,16 +685,108 @@ class AemeathBridge:
         self.pending_proactive = PendingProactive(
             turn_id=turn_id, text=text, sent_at=time.time()
         )
-        await self.send_display_text(turn_id, text)
-        if self._situation.should_speak():
-            await self.send_audio(turn_id, "", display_text={"text": text, "name": "", "avatar": ""})
-        return True
+        # A proactive turn is registered with the recorder like any other, so
+        # its backend timings and receipts have somewhere to land instead of
+        # being an untracked side channel.
+        if self._metrics is not None:
+            self._metrics.start_turn(turn_id, EventSource.PROACTIVE.value)
+
+        sent = await self._coordinator.emit_proactive(
+            TurnId(turn_id), text, source=EventSource.PROACTIVE
+        )
+
+        # The coordinator left the turn open so it could carry this output;
+        # retiring it now is what makes any later slice for the same turn fail
+        # ``may_send_audio``. A user turn or an interrupt that arrived in the
+        # meantime has already retired it, which end_turn treats as a no-op.
+        self._coordinator.end_turn(TurnId(turn_id))
+
+        if sent:
+            self.mark_generation_finished(turn_id)
+            self.finish_turn(turn_id, cancelled=False)
+            return True
+
+        # The turn was superseded or cancelled before anything went out; do not
+        # leave a placeholder waiting for a receipt that cannot come, and close
+        # the metrics entry rather than leaking an unfinished turn.
+        self._invalidate_pending_proactive("candidate superseded before delivery")
+        self.finish_turn(turn_id, cancelled=True)
+        return False
+
+    async def on_speak(self, turn_id: TurnId, text: str, source: EventSource) -> None:
+        """Synthesise one generated message through the same pipeline replies use.
+
+        The coordinator has already confirmed that this turn is current and that
+        the situation permits voice, so this only has to run the synthesis.
+
+        Ordinary replies do **not** come through here: upstream's conversation
+        loop drives ``TTSTaskManager`` for a user turn, and that loop is also
+        what writes the assistant message to history. This path exists for the
+        turns that have no such loop, which is exactly the proactive case — and
+        a proactive message is not yet confirmed as displayed, so it is not
+        remembered here either; the display receipt decides that.
+        """
+        await self._synthesise(str(turn_id), text)
+
+    async def _synthesise(self, turn_id: str, text: str) -> None:
+        """Run one sentence through upstream's real TTS and send the result.
+
+        This is the bridge's own synthesis path, used when there is no upstream
+        conversation loop to drive ``TTSTaskManager`` — which is exactly the
+        proactive case. The engine, the payload builder and the outbound frame
+        are all upstream's; only the caller differs.
+        """
+        engine = self._tts_engine
+        if engine is None:
+            logger.warning(
+                "No TTS engine attached; turn {} produced no proactive audio.",
+                turn_id,
+            )
+            return
+
+        if not self.may_send_audio(turn_id):
+            self.dropped_late_audio += 1
+            logger.info("Speech suppressed for turn {} before synthesis.", turn_id)
+            return
+
+        try:
+            audio_path = await engine.async_generate_audio(
+                text, file_name_no_ext=turn_id
+            )
+        except Exception as exc:
+            logger.error("Proactive synthesis failed for turn {}: {}", turn_id, exc)
+            return
+
+        try:
+            if not self.may_send_audio(turn_id):
+                self.dropped_late_audio += 1
+                logger.info(
+                    "Discarding proactive audio for turn {} (cancelled or muted).",
+                    turn_id,
+                )
+                return
+            payload = prepare_audio_payload(
+                audio_path=audio_path,
+                display_text={"text": text, "name": "Aemeath", "avatar": ""},
+                actions=None,
+            )
+            await self.send_audio_payload(turn_id, payload)
+        except Exception as exc:
+            logger.error("Could not send proactive audio for turn {}: {}", turn_id, exc)
+        finally:
+            try:
+                engine.remove_file(audio_path)
+            except Exception:  # pragma: no cover - cleanup is best effort
+                logger.debug("Could not remove cached audio for turn {}.", turn_id)
 
     async def on_display_receipt(self, *, turn_id: str) -> None:
         """Handle the client confirming that a proactive message was shown.
 
-        Only now is the message recorded as sent and the unanswered pause
-        started.
+        This is the **only** place a proactive message is recorded as sent: the
+        coordinator deliberately does not count at generation time. Counting in
+        both places was A02 — one message consumed two slots of the hourly
+        budget, and a message the client never displayed still counted as
+        delivered. A repeated receipt finds nothing pending and is a no-op.
         """
         pending = self.pending_proactive
         if pending is None or pending.turn_id != turn_id:

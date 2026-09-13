@@ -286,10 +286,10 @@ cd E:\WorkSpace\Aemeath
 - 干净 `v1.2.1` 检出按序套用 0001→0004 成功，8 个文件与工作副本逐字节一致
   （T01 重新核对；补丁 0004 见 [补丁清单](patches/README.md)）
 - 客户端 `npm run build:web` 成功，产物与部署文件 SHA256 相同
-- `pytest` **268 项通过**（161 模块 + 107 生产入口；7 项 `live_api` 默认排除）。
+- `pytest` **276 项通过**（161 模块 + 115 生产入口；7 项 `live_api` 默认排除）。
   其中 244 项为 `71376f0` 基线（2026-09-13 复跑确认，
   见 [验收记录第九节](acceptance.md#九t00-证据复核与回归基线2026-09-13)），
-  T01 新增 24 项主动语音与送达计数回归，见
+  T01 新增 32 项主动语音、送达计数、TTS 引擎归属与 `end_turn` 顺序回归，见
   `tests/integration/test_proactive_voice.py`。
   此处原记 224 项（160 + 64），为补齐真实链路回归之前的旧数字，已更正。
 - 主动输出经真实上游生成器入口（`ServiceContext._install_aemeath_proactive_generator()`）

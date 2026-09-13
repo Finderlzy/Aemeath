@@ -2,7 +2,7 @@
 
 ## 项目依据与现状
 
-Aemeath 是 Windows 桌面 AI 伙伴，角色原型为《鸣潮》爱弥斯，独立于“大肥鱼”。开始工作前读取 [需求](docs/requirements.md) 和 [技术架构](docs/architecture.md)，区分已确认范围、建议和后续待定项。开发前读取 [实施计划](docs/implementation-plan.md)，以其中的本地任务与验收依赖安排工作。
+Aemeath 是 Windows 桌面 AI 伙伴，角色原型为《鸣潮》爱弥斯，独立于“大肥鱼”。开始工作前读取 [需求](docs/requirements.md) 和 [技术架构](docs/architecture.md)，区分已确认范围、建议和后续待定项。开发前读取 [实施计划](docs/implementation-plan.md) 确认里程碑与总体顺序，再到 [Issues](https://github.com/Finderlzy/Aemeath/issues) 认领具体任务：单项任务的范围、依赖、状态与完成证据以 Issue 为准，实施计划不重复维护。
 
 首期底座为 **Open-LLM-VTuber v1.2.1**（固定在 `vendor/Open-LLM-VTuber`，不入版本管理）。
 Aemeath 核心模块位于 `aemeath/`，通过 [四个补丁](docs/patches/README.md) **按序**接入。

@@ -520,16 +520,32 @@ class AemeathBridge:
         return state
 
     def _observe_on(self) -> None:
-        """Mark screen observation as active."""
+        """Mark screen observation as active and let the observer capture.
+
+        Enabling does not reset the observer: a reset here would discard the
+        image-state dedup for a period the user never left, and the generation
+        check already makes any pre-existing in-flight response stale.
+        """
         self._observation_generation += 1
+        if self._screen is not None:
+            self._screen.set_enabled(True)
         logger.info(
             "Screen observation enabled (generation {}).", self._observation_generation
         )
 
     def _observe_off(self) -> None:
-        """Invalidate in-flight observations and drop the current summary."""
+        """Invalidate in-flight observations and drop the current summary.
+
+        The observer is told directly as well as handed a ``reset()``: the two
+        serve different purposes. ``set_enabled(False)`` stops it capturing
+        anything new — a manual request with ``force=True`` would otherwise
+        bypass the interval gates and capture while observation is off — while
+        ``reset()`` bumps its generation so a vision response already in flight
+        discards itself instead of being cached.
+        """
         self._observation_generation += 1
         if self._screen is not None:
+            self._screen.set_enabled(False)
             self._screen.reset()
         logger.info(
             "Screen observation disabled (generation {}).", self._observation_generation

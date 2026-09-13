@@ -20,6 +20,11 @@
 > 修复前回归基线＝`71376f0` 上 **244 passed, 7 deselected**。
 > 该基线只记录修复前事实，**不宣布任何功能通过**。
 
+> **当前回归基线（2026-09-13，GPT-SoVITS 接入后）：`main` 288 → 分支 330 passed, 7 deselected。**
+> 增量 42 项＝13 项真实上游引擎（`test_gpt_sovits_engine.py`）+ 29 项适配器
+> （`test_gpt_sovits_tts.py`），见 [验收记录第十节](acceptance.md#十当前回归基线gpt-sovits-接入后2026-09-13)。
+> 该项只记录测试规模，**不代表 T05 验收通过**。
+
 ## 需求覆盖
 
 | 需求 | 当前依据 | 剩余缺口 | 对应任务 |
@@ -54,7 +59,7 @@ T06 依赖 T03，其语音分支依赖 T05；T07 依赖 T00、T04、T05、T06。
 | T02 修复屏幕观察关闭与迟到响应的生命周期 | [#3](https://github.com/Finderlzy/Aemeath/issues/3) | 无；与 T01 串行集成 |
 | T03 接通屏幕驱动的自动主动对话 | [#4](https://github.com/Finderlzy/Aemeath/issues/4) | T01、T02 |
 | T04 接入可用嵌入服务并验收真实长期记忆 | [#5](https://github.com/Finderlzy/Aemeath/issues/5) | 外部依赖：可用嵌入供应商 |
-| T05 验收真实语音、打断与课堂静音 | [#6](https://github.com/Finderlzy/Aemeath/issues/6) | T01；API ASR/TTS 与音频设备 |
+| T05 验收真实语音、打断与课堂静音 | [#6](https://github.com/Finderlzy/Aemeath/issues/6) | T01；API ASR、本地 GPT-SoVITS 服务与音频设备 |
 | T06 验收主动交流节奏与失败恢复 | [#7](https://github.com/Finderlzy/Aemeath/issues/7) | T03；语音分支依赖 T05 |
 | T07 完成首期可复现交付与持续试用验收 | [#8](https://github.com/Finderlzy/Aemeath/issues/8) | T00、T04、T05、T06 |
 

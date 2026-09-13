@@ -361,3 +361,45 @@ cd E:\WorkSpace\Aemeath
 历史记录中仍有价值的部分**全部保留**：第三节与第五节的两批缺陷表、第四节校准结果、
 第六节已知限制与第八节文件清单均未删改，仅校准了日期、项数与统计口径。
 本次复核**未新增任何未经执行的数据**。
+
+---
+
+## 十、当前回归基线（GPT-SoVITS 接入后，2026-09-13）
+
+本节记录 `task/gpt-sovits-tts-adapter` 分支合入前的实跑结果，用于替换第九节的
+244 项作为**当前**基线。第九节 244 项仍是 T00 的历史记录，两者不矛盾。
+
+### 10.1 实测数字
+
+| 项 | 值 |
+| --- | --- |
+| 分支 / 提交 | `task/gpt-sovits-tts-adapter` / `45cf3fb` |
+| `main` 对照 | `140368d`（T02 合并后） |
+| 命令 | `.\vendor\Open-LLM-VTuber\.venv\Scripts\python.exe -m pytest` |
+| `main` 结果 | **288 passed, 7 deselected** |
+| 分支结果 | **330 passed, 7 deselected, 2 warnings in 30.21s**，退出码 0 |
+| 失败项 | **无** |
+| 排除项 | 7 项 `live_api`（默认排除，属预期） |
+
+### 10.2 新增 42 项的构成
+
+新增两项集成测试文件，实测收集数如下（`pytest --collect-only`）：
+
+| 文件 | 实收项数 | 覆盖 |
+| --- | --- | --- |
+| `tests/integration/test_gpt_sovits_engine.py` | **13** | 真实上游引擎对接本地 api_v2 替身；其中一项钉住上游默认值 `"ture"` |
+| `tests/integration/test_gpt_sovits_tts.py` | **29** | `GPTSoVITSAdapter` 的参数构造、`streaming_mode` 规范化与拒绝非法值、请求契约、错误路径 |
+| 合计 | **42** | — |
+
+`288 + 42 = 330`，与实跑总数一致。集成测试单独运行为 **169 passed**。
+
+> **口径更正**：`dccbc18` 的提交信息把 29 项误写为 13 项，`45cf3fb` 又把 13 项
+> （`test_gpt_sovits_engine.py`）描述为本次新增的全部项数。两个数字实为**两个文件
+> 各自**的项数，不是同一批。以 `--collect-only` 实收为准：13 + 29 = 42。
+
+### 10.3 本节不代表的内容
+
+- **不代表 T05 验收通过**：真实 GPT-SoVITS 服务未安装、未连通，听感未评价；
+  合成播放、打断、课堂静音与延迟四项仍待真实设备验收。
+- **不代表 ASR 验收通过**：ASR 目标未随本次变更，仍在 API 目标与既有阻塞记录下。
+- 隔离测试不能替代真人设备验收。

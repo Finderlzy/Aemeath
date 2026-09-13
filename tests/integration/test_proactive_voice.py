@@ -712,3 +712,252 @@ class TestUpstreamGeneratorImport:
         # as a proactive input rather than treating it as a user statement.
         assert AemeathAgent._event_source(batch).value == "proactive"
         assert isinstance(harness.agent, AemeathAgent)
+
+
+# ----------------------------------------------------------------------
+# TTS engine ownership: reconnects and more than one session context
+# ----------------------------------------------------------------------
+
+
+class TestTtsEngineOwnership:
+    """The bridge is process-wide; the TTS engine belongs to a session.
+
+    ``ServiceContext`` is cloned per WebSocket session while the bridge is a
+    single object for the whole process, so which engine the bridge ends up
+    holding is not obviously right. These tests pin the two arrangements that
+    actually occur in production: a reconnect, and a second session context
+    being built while the first is still live.
+    """
+
+    async def test_bridge_holds_an_engine_after_attach(self, make_harness):
+        """The engine the bridge holds is the one the session context uses."""
+        harness = make_harness()
+        assert harness.bridge._tts_engine is harness.context.tts_engine, (
+            "the bridge must drive the very engine the conversation path uses"
+        )
+
+    async def test_reconnect_keeps_a_usable_engine(self, make_harness):
+        """After a client reconnect the proactive path still has an engine.
+
+        The bridge survives the reconnect (it is process-wide) but the session
+        context does not. If the engine were only ever held by the dead
+        session, the second connection would produce text with no audio.
+        """
+        harness = make_harness()
+        engine = harness.context.tts_engine
+
+        harness.bridge.detach_client()
+        assert harness.bridge._tts_engine is engine, (
+            "detaching a client must not drop the engine"
+        )
+
+        from tests.integration.harness import FakeWebSocket
+
+        socket = FakeWebSocket()
+        harness.bridge.attach_client(socket.send_text, client_uid="second-client")
+        await enable_proactive(harness)
+        socket.clear()
+
+        install_real_generator(harness, _NoopMonkeypatch())
+        harness.agent._llm = FakeLLM(["重连后。"])
+        message = await harness.bridge.run_proactive()
+
+        assert message == "重连后。", "the proactive path must survive a reconnect"
+        frames = socket.frames_of("audio")
+        assert frames, "audio must still be produced after the reconnect"
+        decode_wav(frames[0]["audio"])
+        assert engine.synthesised, "the same engine must have done the work"
+
+    async def test_second_session_context_does_not_steal_or_break_the_engine(
+        self, make_harness
+    ):
+        """A second session context leaves the bridge with a working engine.
+
+        Production attaches the engine from both ``init_tts`` and ``init_agent``
+        because the two can run in either order, and each session context runs
+        both. Whichever session finished last owns the attachment, so the
+        invariant is that the bridge always holds *an* engine — never ``None``.
+        """
+        harness = make_harness()
+
+        # A second session, as a second WebSocket connection would build it.
+        from src.open_llm_vtuber.service_context import ServiceContext
+
+        other = ServiceContext()
+        other.character_config = harness.context.character_config
+        other.aemeath_bridge = harness.bridge
+
+        from tests.integration.harness import FakeTTSEngine
+
+        other_engine = FakeTTSEngine()
+        other.tts_engine = other_engine
+        # This is exactly what upstream's init_tts does for an Aemeath session.
+        other.aemeath_bridge.attach_tts_engine(other.tts_engine)
+
+        assert harness.bridge._tts_engine is not None, (
+            "the bridge must never be left without an engine"
+        )
+
+        await enable_proactive(harness)
+        harness.websocket.clear()
+        install_real_generator(harness, _NoopMonkeypatch())
+        harness.agent._llm = FakeLLM(["多会话下。"])
+
+        message = await harness.bridge.run_proactive()
+
+        assert message == "多会话下。"
+        frames = harness.websocket.frames_of("audio")
+        assert frames, "audio must be produced with the currently attached engine"
+        decode_wav(frames[0]["audio"])
+        assert other_engine.synthesised, (
+            "the most recently attached session engine is the one that voices "
+            "the message, because the bridge can only hold one"
+        )
+
+    async def test_missing_engine_degrades_to_text_only(self, make_harness):
+        """With no engine the text still goes out and nothing raises."""
+        harness = make_harness()
+        harness.bridge.attach_tts_engine(None)
+        await enable_proactive(harness)
+        harness.websocket.clear()
+        install_real_generator(harness, _NoopMonkeypatch())
+        harness.agent._llm = FakeLLM(["没有引擎。"])
+
+        message = await harness.bridge.run_proactive()
+
+        assert message == "没有引擎。", "text must still be delivered"
+        assert harness.websocket.frames_of("aemeath-text")
+        assert harness.websocket.frames_of("audio") == [], (
+            "no engine means no audio, not an empty audio frame"
+        )
+
+
+class _NoopMonkeypatch:
+    """Stand-in for ``pytest.MonkeyPatch`` when a helper only calls setattr.
+
+    ``install_real_generator`` uses monkeypatch solely to pin the proactive
+    prompt; tests that build their own harness variant can pass this instead of
+    requesting the fixture.
+    """
+
+    def setattr(self, target, name, value, raising=True):  # noqa: ARG002
+        """Apply the attribute, as pytest's fixture would."""
+        setattr(target, name, value)
+
+
+# ----------------------------------------------------------------------
+# end_turn versus ordinary audio sending
+# ----------------------------------------------------------------------
+
+
+class TestEndTurnOrdering:
+    """``end_turn`` must retire a turn without cutting its own audio short.
+
+    The bridge sends a proactive turn's text and audio and only then retires the
+    turn. If retiring happened first, the very audio the turn just produced
+    would fail ``may_send_audio`` and be discarded — the turn would silently
+    deliver nothing. The ordering is therefore load-bearing, not incidental.
+    """
+
+    async def test_audio_is_sent_before_the_turn_is_retired(
+        self, make_harness, monkeypatch
+    ):
+        """The full audio for a turn goes out; the turn is retired after."""
+        harness = make_harness()
+        await enable_proactive(harness)
+        harness.websocket.clear()
+
+        from aemeath.interfaces import TurnId
+
+        observed: list = []
+        original_send = harness.bridge.send_audio_payload
+
+        async def recording_send(turn_id, payload):
+            """Record whether the turn was still sendable at send time."""
+            observed.append(harness.bridge.may_send_audio(turn_id))
+            return await original_send(turn_id, payload)
+
+        harness.bridge.send_audio_payload = recording_send
+
+        await proactive_turn(
+            harness, monkeypatch, text="先发后退休。", llm=FakeLLM(["先发后退休。"])
+        )
+
+        assert observed, "the audio path must have run"
+        assert all(observed), (
+            "audio was sent after the turn had already been retired; the turn "
+            "would have delivered nothing"
+        )
+        assert harness.websocket.frames_of("audio"), "audio must reach the client"
+
+    async def test_turn_is_retired_once_delivery_finishes(self, make_harness, monkeypatch):
+        """After delivery the turn no longer accepts audio."""
+        harness = make_harness()
+        await enable_proactive(harness)
+        harness.websocket.clear()
+
+        await proactive_turn(
+            harness, monkeypatch, text="送完即退休。", llm=FakeLLM(["送完即退休。"])
+        )
+        turn_id = harness.websocket.frames_of("aemeath-text")[-1]["turn_id"]
+
+        assert harness.bridge.may_send_audio(turn_id) is False, (
+            "a delivered turn must not accept further slices"
+        )
+        assert await harness.bridge.send_audio(turn_id, "ZmFrZQ==") is None, (
+            "audio for a retired turn must be refused"
+        )
+
+    async def test_ordinary_reply_audio_is_unaffected_by_proactive_retirement(
+        self, make_harness
+    ):
+        """Retiring a proactive turn must not disturb an ordinary reply.
+
+        The two turns are distinct ids; retiring one must not make the other's
+        audio unsendable, which is what a shared-id mistake would cause.
+        """
+        from aemeath.interfaces import EventSource, TurnId
+
+        harness = make_harness(llm=FakeLLM(["普通回复。"]))
+        await enable_proactive(harness)
+
+        # A proactive attempt retires its own turn.
+        install_real_generator(harness, _NoopMonkeypatch())
+        await harness.bridge.run_proactive()
+
+        # A later user turn is independent and may still speak.
+        turn = harness.bridge._coordinator.begin_turn(EventSource.USER_TEXT)
+        assert harness.bridge.may_send_audio(str(turn.turn_id)) is True, (
+            "an ordinary turn must not inherit a proactive turn's retirement"
+        )
+
+    async def test_retired_turn_id_is_never_reissued(self, make_harness, monkeypatch):
+        """Two proactive attempts use different turn ids.
+
+        ``end_turn`` adds the id to the cancelled set, so a reissued id would be
+        born already-retired and the second message would silently vanish.
+        """
+        harness = make_harness(
+            aemeath_overrides={"proactive": {"cooldown_seconds": 1, "max_per_hour": 5}}
+        )
+        await enable_proactive(harness)
+        scheduler = harness.bridge._coordinator.scheduler
+        harness.websocket.clear()
+
+        seen: list = []
+        for index in range(2):
+            text = f"第{index}次。"
+            # Clear the rate limits between attempts: this test is about turn
+            # ids, and the cooldown would otherwise decide the outcome instead.
+            scheduler.reset()
+            await proactive_turn(harness, monkeypatch, text=text, llm=FakeLLM([text]))
+            frames = harness.websocket.frames_of("aemeath-text")
+            assert frames, f"attempt {index} produced no text"
+            turn_id = frames[-1]["turn_id"]
+            seen.append(turn_id)
+            await harness.bridge.on_display_receipt(turn_id=turn_id)
+
+        assert seen[0] != seen[1], "each attempt must mint a fresh turn id"
+        assert len(harness.websocket.frames_of("audio")) >= 2, (
+            "both attempts must produce audio, not just the first"
+        )

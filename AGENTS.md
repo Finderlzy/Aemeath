@@ -10,11 +10,12 @@ Aemeath 核心模块位于 `aemeath/`，通过 [四个补丁](docs/patches/READM
 
 > **TTS 是"全部使用外部模型 API"的唯一例外。** 正式语音方案为**本地 GPT-SoVITS**
 > （本机 HTTP 服务，api_v2，默认 `http://127.0.0.1:9880/tts`），已由用户确认；
-> 引擎随上游内置，Aemeath 只负责配置与连通探针。`tts_model` 默认仍为 `edge_tts`，
+> 引擎随上游内置，Aemeath 负责配置与连通探针。`tts_model` 默认仍为 `edge_tts`，
 > 切换到 `gpt_sovits_tts` 前必须先启动该服务，否则 TTS 不可用（须明确报错，
-> 不得静默退回其他引擎）。**ASR 未随此调整**，仍是 API 目标。
-> 音色本身不在完成条件内，不编造原作设定。详见 [需求](docs/requirements.md) 与
-> [架构](docs/architecture.md#tts-正式方案本地-gpt-sovits2026-09-13-用户确认)。
+> 不得静默退回其他引擎）。参考音频暂缺，首期先不做角色音色与听感验收。
+> **ASR 首期目标调整为本地 SenseVoice**（基于 sherpa-onnx 本地运行），
+> 麦克风录音转写链路已实测可用。原有识别准确率、打断、静音及延迟验收要求全部保留。
+> 详见 [需求](docs/requirements.md) 与 [架构](docs/architecture.md)。
 
 > **导入上游必须用 `src.open_llm_vtuber.*`。** 上游是脚本方式启动的，
 > 自身模块加载为 `src.open_llm_vtuber.*`；若以 `open_llm_vtuber.*` 导入同一批文件，

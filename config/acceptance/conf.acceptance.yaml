@@ -113,8 +113,18 @@ character_config:
       lang: 'zh'
 
   tts_config:
-    # 首期默认 edge_tts：中文可用、无需密钥，先验证播放与取消链路。
-    tts_model: 'edge_tts'
+    tts_model: 'gpt_sovits_tts'
+
+    gpt_sovits:
+      api_url: 'http://127.0.0.1:9880/tts'
+      text_lang: 'zh'
+      ref_audio_path: 'E:/WorkSpace/Aemeath/data/voice-reference/reference.wav'
+      prompt_lang: 'zh'
+      prompt_text: '我喜欢和大家一起热闹开心地做事，因为要轻松快乐地活着嘛。'
+      text_split_method: 'cut5'
+      batch_size: '1'
+      media_type: 'wav'
+      streaming_mode: 'false'
 
     edge_tts:
       voice: zh-CN-XiaoxiaoNeural

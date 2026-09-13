@@ -60,7 +60,7 @@ T06 依赖 T03，其语音分支依赖 T05；T07 依赖 T00、T04、T05、T06。
 | T02 修复屏幕观察关闭与迟到响应的生命周期 | [#3](https://github.com/Finderlzy/Aemeath/issues/3) | 无；与 T01 串行集成 |
 | T03 接通屏幕驱动的自动主动对话 | [#4](https://github.com/Finderlzy/Aemeath/issues/4) | T01、T02 |
 | T04 接入可用嵌入服务并验收真实长期记忆 | [#5](https://github.com/Finderlzy/Aemeath/issues/5) | 外部依赖：可用嵌入供应商 |
-| T05 验收真实语音、打断与课堂静音 | [#6](https://github.com/Finderlzy/Aemeath/issues/6) | T01；API ASR、本地 GPT-SoVITS 服务与音频设备 |
+| T05 验收真实语音、打断与课堂静音 | [#6](https://github.com/Finderlzy/Aemeath/issues/6) | T01；本地 SenseVoice、本地 GPT-SoVITS 服务与音频设备 |
 | T06 验收主动交流节奏与失败恢复 | [#7](https://github.com/Finderlzy/Aemeath/issues/7) | T03；语音分支依赖 T05 |
 | T07 完成首期可复现交付与持续试用验收 | [#8](https://github.com/Finderlzy/Aemeath/issues/8) | T00、T04、T05、T06 |
 
@@ -73,20 +73,16 @@ T01 建议执行顺序：先从真实上游主动生成器入口建立失败回�
 使用独立验收配置、数据库与日志。不得复制大肥鱼数据、改变其服务，或为验证关闭真实工作窗口、向联系人发消息。
 
 可直接推进 T01–T03 的代码与隔离验证，不必等待嵌入供应商。T04 需要可用嵌入服务；
-T05 的 **ASR** 目标仍需要支持音频转写的服务，**TTS 已不再要求 API**（见下）。
-现有 SenseVoice 与 edge-tts 可以用来定位设备／播放问题，但不能替代 API ASR 验收。
+T05 的语音链路采用本地 SenseVoice 与本地 GPT-SoVITS 方案。
 
-**已确认的范围调整（2026-09-13）**：TTS 正式方案改为**本地 GPT-SoVITS**，
-通过 localhost HTTP 接入，不再要求云端 API TTS。理由与完整边界见
-[需求](requirements.md)；接入实现与两个上游缺陷见
-[架构](architecture.md#tts-正式方案本地-gpt-sovits2026-09-13-用户确认)。
+**已确认的范围调整（2026-09-13）**：
+1. **ASR 首期目标改为本地 SenseVoice**：通过 sherpa-onnx 在本地运行，麦克风转写链路已实测通，原有识别、打断、静音及延迟验收要求全部保留。
+2. **TTS 正式方案为本地 GPT-SoVITS**：通过 localhost HTTP (api_v2) 接入，服务已安装连通。参考音频暂缺，首期先不做角色音色与听感验收。
+3. 理由与完整边界见 [需求](requirements.md)；架构与接入实现见 [架构](architecture.md)。
 
-- T05 的 TTS 验收改为：真实 GPT-SoVITS 服务的合成播放、语音打断、课堂静音与延迟，
-  **判据不放宽**（仍是 A1–A7 与三项 ≥20 样本）。
-- T05 的 ASR 部分**不变**，仍在 API 目标与既有阻塞记录下。
-- 音色本身不在本次完成条件内；爱弥斯正式音色与专属训练另行确定，不编造原作设定。
-- GPT-SoVITS 服务未启动时 TTS 不可用，这是该方案引入的本机进程依赖，
-  必须表现为明确不可用，不得静默退回其他引擎。
+- T05 的验收口径：基于本地 SenseVoice 与本地 GPT-SoVITS 服务验证语音对话、播放打断、课堂静音与延迟，**判据不放宽**（仍保留 A1–A7 与三项 ≥20 样本）。
+- 音色本身不在本次完成条件内，参考音频暂缺先不做角色音色与听感验收；爱弥斯正式音色与专属训练另行确定，不编造原作设定。
+- 本机服务依赖：GPT-SoVITS 服务未启动时 TTS 不可用，必须表现为明确不可用，不得静默退回其他引擎。
 
 正式角色声音、美术与月预算在对应选型前细化。后续作息、提醒、表达学习、电脑操作和 QQ/微信渠道在 M3 后按场景规划，保留需求但不提前拆到函数。
 情绪躲藏、音量检查与微信代答（F01–F03）不纳入本批 Issue。

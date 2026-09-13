@@ -51,7 +51,7 @@ class TestSpeechBackendClassification:
         }
         asr, tts = _upstream_speech_backends(parsed, "test")
         assert tts == "gpt_sovits_tts"
-        assert asr == "local"
+        assert asr == "sherpa_onnx_asr"
 
     def test_edge_tts_and_absent_model_stay_local(self):
         from aemeath.config import _upstream_speech_backends

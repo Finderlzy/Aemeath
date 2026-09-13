@@ -32,6 +32,7 @@ __all__ = [
     "OpenAICompatibleExtraction",
     "OpenAICompatibleVision",
     "GPTSoVITSAdapter",
+    "SenseVoiceAdapter",
     "AdapterFactory",
     "RetryPolicy",
     "cosine_similarity",
@@ -618,6 +619,81 @@ class GPTSoVITSAdapter:
         return response.content
 
 
+class SenseVoiceAdapter:
+    """Offline ASR adapter using Sherpa-ONNX SenseVoice.
+
+    Transcribes WAV audio bytes or PCM numpy arrays using the local
+    sherpa-onnx runtime and SenseVoice model.
+    """
+
+    def __init__(
+        self,
+        model_path: str,
+        tokens_path: str,
+        num_threads: int = 2,
+        use_itn: bool = True,
+    ) -> None:
+        self.model_path = model_path
+        self.tokens_path = tokens_path
+        self.num_threads = num_threads
+        self.use_itn = use_itn
+        self._recognizer = None
+
+    def _get_recognizer(self):
+        if self._recognizer is None:
+            import sherpa_onnx
+
+            if not os.path.isfile(self.model_path):
+                raise FileNotFoundError(f"SenseVoice model not found: {self.model_path}")
+            if not os.path.isfile(self.tokens_path):
+                raise FileNotFoundError(f"SenseVoice tokens not found: {self.tokens_path}")
+
+            self._recognizer = sherpa_onnx.OfflineRecognizer.from_sense_voice(
+                model=self.model_path,
+                tokens=self.tokens_path,
+                num_threads=self.num_threads,
+                use_itn=self.use_itn,
+                debug=False,
+            )
+        return self._recognizer
+
+    def transcribe_np(self, audio: np.ndarray, sample_rate: int = 16000) -> str:
+        """Synchronously transcribe a float32 numpy array."""
+        recognizer = self._get_recognizer()
+        stream = recognizer.create_stream()
+        stream.accept_waveform(sample_rate, audio)
+        recognizer.decode_streams([stream])
+        return stream.result.text
+
+    async def transcribe(self, audio: bytes) -> str:
+        """Transcribe WAV audio bytes (or raw PCM bytes) to text."""
+        import asyncio
+        import io
+        import wave
+
+        try:
+            with wave.open(io.BytesIO(audio), "rb") as wf:
+                sample_rate = wf.getframerate()
+                channels = wf.getnchannels()
+                sampwidth = wf.getsampwidth()
+                frames = wf.readframes(wf.getnframes())
+                if sampwidth == 2:
+                    data = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
+                elif sampwidth == 4:
+                    data = np.frombuffer(frames, dtype=np.float32)
+                else:
+                    raise ValueError(f"Unsupported sample width: {sampwidth}")
+                if channels > 1:
+                    data = data.reshape(-1, channels).mean(axis=1)
+        except (wave.Error, EOFError):
+            # Treat as 16kHz 16-bit mono PCM if WAV header is absent or invalid
+            sample_rate = 16000
+            data = np.frombuffer(audio, dtype=np.int16).astype(np.float32) / 32768.0
+
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self.transcribe_np, data, sample_rate)
+
+
 class AdapterFactory:
     """Builds model adapters from configuration.
 
@@ -830,6 +906,74 @@ class AdapterFactory:
                 f"tts backend '{speech.tts_backend}' has no Aemeath probe "
                 "adapter; probe it through the upstream engine or add one"
             ),
+        )
+
+    def _resolve_model_path(self, path_str: str) -> str:
+        """Resolve model path relative to workspace or upstream directory."""
+        if not path_str:
+            return ""
+        from pathlib import Path
+
+        p = Path(path_str)
+        if p.is_file():
+            return str(p)
+        cleaned = path_str.lstrip("./").lstrip(".\\")
+        upstream_p = Path("vendor/Open-LLM-VTuber") / cleaned
+        if upstream_p.is_file():
+            return str(upstream_p)
+        return path_str
+
+    def build_asr(self):
+        """Build the ASR adapter and report its state.
+
+        When asr_backend is sherpa_onnx_asr (or local with sherpa config),
+        resolves the SenseVoice model paths and builds a SenseVoiceAdapter.
+        """
+        speech = self._config.speech
+        sherpa = speech.sherpa_onnx
+        if speech.asr_backend in ("sherpa_onnx_asr", "local") and sherpa:
+            model_type = sherpa.get("model_type")
+            if model_type == "sense_voice":
+                model_path = self._resolve_model_path(sherpa.get("sense_voice", ""))
+                tokens_path = self._resolve_model_path(sherpa.get("tokens", ""))
+                if not os.path.isfile(model_path):
+                    return None, self._status(
+                        "asr",
+                        configured=True,
+                        enabled=False,
+                        error=f"SenseVoice model file missing: {model_path}",
+                    )
+                if not os.path.isfile(tokens_path):
+                    return None, self._status(
+                        "asr",
+                        configured=True,
+                        enabled=False,
+                        error=f"SenseVoice tokens file missing: {tokens_path}",
+                    )
+                adapter = SenseVoiceAdapter(
+                    model_path=model_path,
+                    tokens_path=tokens_path,
+                )
+                return adapter, self._status(
+                    "asr",
+                    configured=True,
+                    enabled=True,
+                    detail=f"sense_voice: {model_path}",
+                )
+
+        if speech.asr_backend == "local":
+            return None, self._status(
+                "asr",
+                configured=False,
+                enabled=False,
+                detail="asr backend is local placeholder with no model configured",
+            )
+
+        return None, self._status(
+            "asr",
+            configured=False,
+            enabled=False,
+            detail=f"asr backend '{speech.asr_backend}' has no Aemeath probe adapter",
         )
 
     def build_capture(self):

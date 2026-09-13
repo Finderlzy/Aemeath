@@ -162,6 +162,8 @@ class SpeechConfig:
     #: document the engine is built from. Kept as a plain dict because
     #: upstream owns the schema; only the probe adapter consumes it.
     gpt_sovits: Optional[Dict[str, Any]] = None
+    #: The upstream ``sherpa_onnx_asr`` config block.
+    sherpa_onnx: Optional[Dict[str, Any]] = None
 
 
 @dataclass(frozen=True)
@@ -352,15 +354,23 @@ def _upstream_speech_backends(
     tts_model = str(tts_config.get("tts_model") or "")
 
     # Engines that run on this machine and need no provider. ``gpt_sovits_tts``
-    # is NOT here: it is a local server, but it is the confirmed formal
-    # voice, so it must be reported by name rather than hidden behind
-    # the anonymous "local" placeholder.
-    local_asr = {"sherpa_onnx_asr", "faster_whisper", "funasr"}
+    # and ``sherpa_onnx_asr`` are NOT here: they are the confirmed formal
+    # voice and ASR solutions, so they must be reported by name rather than
+    # hidden behind the anonymous "local" placeholder.
+    local_asr = {"faster_whisper", "funasr"}
     local_tts = {"edge_tts", "melo_tts", "piper_tts", "bark_tts"}
 
     asr = "local" if (not asr_model or asr_model in local_asr) else asr_model
     tts = "local" if (not tts_model or tts_model in local_tts) else tts_model
     return asr, tts
+
+
+def _upstream_sherpa_onnx_block(parsed: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Read the ``sherpa_onnx_asr`` block from the upstream ASR config."""
+    character = (parsed.get("character_config") or {})
+    asr_config = character.get("asr_config") or {}
+    block = asr_config.get("sherpa_onnx_asr")
+    return dict(block) if isinstance(block, dict) else None
 
 
 def _upstream_gpt_sovits_block(parsed: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -487,6 +497,7 @@ def load_config(config_path: Optional[Path] = None) -> AemeathConfig:
             asr_backend=asr_backend,
             tts_backend=tts_backend,
             gpt_sovits=_upstream_gpt_sovits_block(upstream_parsed),
+            sherpa_onnx=_upstream_sherpa_onnx_block(upstream_parsed),
         ),
         providers=ProviderSet(
             embedding=_provider(

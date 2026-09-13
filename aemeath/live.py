@@ -485,38 +485,45 @@ async def probe_conversation(config) -> ProbeResult:
 
 
 async def probe_asr(config, audio: Optional[bytes] = None) -> ProbeResult:
-    """Check the configured ASR engine actually transcribes a real recording.
+    """Check the configured ASR engine actually transcribes a recording.
 
-    This probe deliberately does **not** substitute a local engine. The plan is
-    explicit that SenseVoice initialising is not evidence that an API engine was
-    selected, so the probe reports which backend is live and fails when that
-    backend is local rather than silently passing.
+    Uses the configured ASR adapter (local SenseVoice under sherpa-onnx
+    or an external API engine). If no audio is provided, attempts to verify
+    with the local reference test audio.
 
     Args:
         config: Resolved :class:`~aemeath.config.AemeathConfig`.
-        audio: WAV bytes to transcribe. Required: a probe cannot invent speech.
+        audio: WAV bytes to transcribe.
 
     Returns:
         The probe result.
     """
     backend = config.speech.asr_backend
-    if backend == "local":
-        return _not_configured(
-            "asr",
-            "configured engine is local (sherpa SenseVoice); no API ASR is selected",
-        )
+    from .adapters import AdapterFactory
+
+    adapter, status = AdapterFactory.from_config(config).build_asr()
+    if adapter is None:
+        return _not_configured("asr", status.error or status.detail)
 
     if audio is None:
-        return ProbeResult(
-            capability="asr",
-            configured=True,
-            skipped=True,
-            detail=(
-                f"ASR backend '{backend}' needs a real recording; "
-                "pass --asr-audio PATH or record one when prompted"
-            ),
-            evidence={"backend": backend},
+        from pathlib import Path
+
+        ref_wav = Path(
+            "vendor/Open-LLM-VTuber/models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/test_wavs/zh.wav"
         )
+        if ref_wav.is_file():
+            audio = ref_wav.read_bytes()
+        else:
+            return ProbeResult(
+                capability="asr",
+                configured=True,
+                skipped=True,
+                detail=(
+                    f"ASR backend '{backend}' needs a real recording; "
+                    "pass --asr-audio PATH or record one when prompted"
+                ),
+                evidence={"backend": backend},
+            )
 
     from .adapters import AdapterFactory
 

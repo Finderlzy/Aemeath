@@ -730,6 +730,11 @@ def build_runtime(
             min_stable_seconds=resolved.screen.min_stable_seconds,
             summary_max_age_seconds=resolved.screen.summary_max_age_seconds,
         )
+        # The observer starts disabled and follows the persisted situation
+        # state, so a restart never begins observing a screen the user had
+        # switched off. ``set_enabled`` is a no-op when already False, so this
+        # does not bump the generation on a cold start.
+        screen.set_enabled(situation.state.screen_observation_enabled)
 
     # The bridge is created first so the coordinator's output hooks can point at
     # it: *whether* to speak stays the coordinator's decision, while delivering

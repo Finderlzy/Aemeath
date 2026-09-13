@@ -196,6 +196,44 @@ class ScreenObserver:
         # Only ever holds the most recent image; nothing is written to disk.
         self._last_image: Optional[bytes] = None
 
+        #: Whether observation is currently permitted. The observer guards
+        #: itself rather than trusting every caller to check the switch: a
+        #: ``force=True`` request skips the interval and stability gates, so it
+        #: is exactly the path that would otherwise capture with observation
+        #: off.
+        self._enabled = False
+
+        #: Bumped by :meth:`reset`. A vision response is only written back if
+        #: this still matches the value captured before the call, so a reply
+        #: that arrives after observation was switched off — or switched off
+        #: *and on again* — is discarded instead of cached. Refusing to send
+        #: the frame is not the same as refusing to remember it.
+        self._generation = 0
+
+    @property
+    def generation(self) -> int:
+        """Current observation generation, bumped on every reset."""
+        return self._generation
+
+    @property
+    def enabled(self) -> bool:
+        """Whether observation is currently permitted."""
+        return self._enabled
+
+    def set_enabled(self, enabled: bool) -> None:
+        """Enable or disable observation, invalidating in-flight work.
+
+        Args:
+            enabled: Desired state.
+        """
+        if enabled == self._enabled:
+            return
+        self._enabled = enabled
+        if not enabled:
+            self.reset()
+        logger.info("Screen observation {} (generation {}).",
+                    "enabled" if enabled else "disabled", self._generation)
+
     @property
     def latest(self) -> Optional[ScreenObservation]:
         """The most recent observation, regardless of age."""
@@ -251,6 +289,11 @@ class ScreenObserver:
     async def observe(self, *, force: bool = False) -> Optional[ScreenObservation]:
         """Capture and describe the current foreground window.
 
+        Every stage re-checks the observation generation, because the user can
+        switch observation off at any point during an await. ``force`` skips the
+        interval and stability gates, but never the enabled check: the manual
+        request is a way to skip throttling, not a way to observe while off.
+
         Args:
             force: Skip the interval and stability gates, for the explicit
                 "look at my screen" button.
@@ -259,6 +302,11 @@ class ScreenObserver:
             A new observation, or ``None`` when capture was skipped or failed.
         """
         now = time.time()
+        generation = self._generation
+
+        if not self._enabled:
+            logger.debug("Screen observation skipped: observation is off.")
+            return None
 
         if self._backend.is_locked():
             logger.info("Screen observation skipped: session is locked.")
@@ -303,6 +351,19 @@ class ScreenObserver:
             logger.error("Vision model failed: {}", exc)
             return None
 
+        # The vision call is an arbitrary-length await. If observation was
+        # switched off (or off and on again) while it ran, this response
+        # belongs to a generation nobody is waiting for any more: drop it
+        # instead of caching it. Without this the bridge could refuse to send
+        # the frame while the observer still kept the summary, which is A03.
+        if generation != self._generation:
+            logger.info(
+                "Discarding vision response from stale generation {} (now {}).",
+                generation,
+                self._generation,
+            )
+            return None
+
         observation = ScreenObservation(
             observation_id=hashlib.sha256(
                 f"{digest}{now}".encode("utf-8")
@@ -316,12 +377,18 @@ class ScreenObserver:
         return observation
 
     def reset(self) -> None:
-        """Forget cached image state, e.g. when observation is turned off.
+        """Invalidate in-flight observations and forget cached state.
+
+        Bumping the generation is what makes this effective: a vision response
+        already in flight compares against the value it captured on entry and
+        discards itself rather than writing back a summary from a period the
+        user has left.
 
         The current summary is dropped too: once observation is off, the last
         thing Aemeath saw is no longer something she may present as "what you
         are doing right now".
         """
+        self._generation += 1
         self._last_image = None
         self._last_image_hash = ""
         self._window_signature = ""

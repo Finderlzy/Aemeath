@@ -74,6 +74,22 @@ class TurnMetric:
     #: Whether generation finished, separately from whether playback finished.
     generation_finished: bool = False
     playback_finished: bool = False
+    # -- optional verifiable provenance for receipts -------------------
+    text_sample_source: Optional[str] = None
+    playback_sample_source: Optional[str] = None
+    cancel_sample_source: Optional[str] = None
+    cancel_trigger: Optional[str] = None
+
+
+def _is_valid_timing_sample(val: Any) -> bool:
+    """Check that a client timing value is a non-negative finite number."""
+    if val is None:
+        return False
+    try:
+        f = float(val)
+        return math.isfinite(f) and f >= 0.0
+    except (TypeError, ValueError):
+        return False
 
 
 @dataclass
@@ -348,40 +364,118 @@ class MetricsRecorder:
 
     # -- client receipts ------------------------------------------------
 
-    def mark_text_displayed(self, turn_id: str,
-                            client_elapsed_ms: Optional[float] = None) -> None:
-        """Record the client-measured input-to-display duration."""
-        metric = self._find(turn_id)
-        if metric is None or client_elapsed_ms is None:
-            return
-        if metric.client_first_text_ms is None:
-            metric.client_first_text_ms = float(client_elapsed_ms)
-            self.client_first_text.add(client_elapsed_ms)
-            if metric.finished:
-                self._update_persisted(metric)
+    def mark_text_displayed(
+        self,
+        turn_id: str,
+        client_elapsed_ms: Optional[float] = None,
+        *,
+        sample_source: Optional[str] = None,
+    ) -> bool:
+        """Record the client-measured input-to-display duration.
 
-    def mark_playback_started(self, turn_id: str, audio_slice_id: str = "",
-                              client_elapsed_ms: Optional[float] = None) -> None:
-        """Record the client-measured stop-speaking-to-playback duration."""
+        Rejects non-finite, negative, duplicate, or unknown turn samples.
+        """
+        if not _is_valid_timing_sample(client_elapsed_ms):
+            logger.warning(
+                "Rejected invalid text timing sample: turn_id={}, elapsed={}",
+                turn_id,
+                client_elapsed_ms,
+            )
+            return False
         metric = self._find(turn_id)
-        if metric is None or client_elapsed_ms is None:
-            return
-        if metric.client_playback_start_ms is None:
-            metric.client_playback_start_ms = float(client_elapsed_ms)
-            self.client_playback_start.add(client_elapsed_ms)
-            if metric.finished:
-                self._update_persisted(metric)
+        if metric is None:
+            logger.warning("Rejected text timing sample for unknown turn_id: {}", turn_id)
+            return False
+        if metric.client_first_text_ms is not None:
+            logger.warning("Rejected duplicate text timing sample for turn_id: {}", turn_id)
+            return False
 
-    def mark_cancel_complete(self, turn_id: str,
-                             client_elapsed_ms: Optional[float] = None) -> None:
-        """Record the client-measured stop-click-to-silence duration."""
-        metric = self._find(turn_id)
-        if metric is None or client_elapsed_ms is None:
-            return
-        metric.client_cancel_ms = float(client_elapsed_ms)
-        self.client_cancel.add(client_elapsed_ms)
+        elapsed = float(client_elapsed_ms)
+        metric.client_first_text_ms = elapsed
+        metric.text_sample_source = sample_source
+        self.client_first_text.add(elapsed)
         if metric.finished:
             self._update_persisted(metric)
+        return True
+
+    def mark_playback_started(
+        self,
+        turn_id: str,
+        audio_slice_id: str = "",
+        client_elapsed_ms: Optional[float] = None,
+        *,
+        sample_source: Optional[str] = None,
+    ) -> bool:
+        """Record the client-measured stop-speaking-to-playback duration.
+
+        Rejects non-finite, negative, duplicate, or unknown turn samples.
+        """
+        if not _is_valid_timing_sample(client_elapsed_ms):
+            logger.warning(
+                "Rejected invalid playback timing sample: turn_id={}, elapsed={}",
+                turn_id,
+                client_elapsed_ms,
+            )
+            return False
+        metric = self._find(turn_id)
+        if metric is None:
+            logger.warning(
+                "Rejected playback timing sample for unknown turn_id: {}", turn_id
+            )
+            return False
+        if metric.client_playback_start_ms is not None:
+            logger.warning(
+                "Rejected duplicate playback timing sample for turn_id: {}", turn_id
+            )
+            return False
+
+        elapsed = float(client_elapsed_ms)
+        metric.client_playback_start_ms = elapsed
+        metric.playback_sample_source = sample_source
+        self.client_playback_start.add(elapsed)
+        if metric.finished:
+            self._update_persisted(metric)
+        return True
+
+    def mark_cancel_complete(
+        self,
+        turn_id: str,
+        client_elapsed_ms: Optional[float] = None,
+        *,
+        sample_source: Optional[str] = None,
+        trigger: Optional[str] = None,
+    ) -> bool:
+        """Record the client-measured stop-click-to-silence duration.
+
+        Rejects non-finite, negative, duplicate, or unknown turn samples.
+        """
+        if not _is_valid_timing_sample(client_elapsed_ms):
+            logger.warning(
+                "Rejected invalid cancel timing sample: turn_id={}, elapsed={}",
+                turn_id,
+                client_elapsed_ms,
+            )
+            return False
+        metric = self._find(turn_id)
+        if metric is None:
+            logger.warning(
+                "Rejected cancel timing sample for unknown turn_id: {}", turn_id
+            )
+            return False
+        if metric.client_cancel_ms is not None:
+            logger.warning(
+                "Rejected duplicate cancel timing sample for turn_id: {}", turn_id
+            )
+            return False
+
+        elapsed = float(client_elapsed_ms)
+        metric.client_cancel_ms = elapsed
+        metric.cancel_sample_source = sample_source
+        metric.cancel_trigger = trigger
+        self.client_cancel.add(elapsed)
+        if metric.finished:
+            self._update_persisted(metric)
+        return True
 
     def finish_turn(
         self,

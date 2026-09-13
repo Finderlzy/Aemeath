@@ -359,3 +359,45 @@ class TestMetricsThroughBridge:
         summary = harness.runtime.metrics.summary()
         assert summary["turns"] == 1
         assert summary["backend"]["first_text_ms"]["count"] == 1
+
+    def test_rejection_of_invalid_and_duplicate_samples(self):
+        """Recorder rejects negative, non-finite, duplicate, and cross-turn samples."""
+        recorder = MetricsRecorder()
+        recorder.start_turn("t1", "user_text")
+
+        # Negative and non-finite values rejected
+        assert recorder.mark_text_displayed("t1", client_elapsed_ms=-1.0) is False
+        assert recorder.mark_playback_started("t1", client_elapsed_ms=float("nan")) is False
+        assert recorder.mark_cancel_complete("t1", client_elapsed_ms=float("inf")) is False
+
+        # Unknown turn rejected
+        assert recorder.mark_text_displayed("unknown-turn", client_elapsed_ms=100.0) is False
+
+        # Valid sample accepted
+        assert (
+            recorder.mark_text_displayed(
+                "t1", client_elapsed_ms=120.0, sample_source="user_text_input"
+            )
+            is True
+        )
+        metric = recorder.turns[0]
+        assert metric.client_first_text_ms == 120.0
+        assert metric.text_sample_source == "user_text_input"
+
+        # Duplicate sample for the same turn rejected
+        assert recorder.mark_text_displayed("t1", client_elapsed_ms=150.0) is False
+        assert metric.client_first_text_ms == 120.0
+
+    def test_voice_input_source_mapping(self):
+        """Array input maps to user_voice, string input maps to user_text."""
+        from aemeath.interfaces import EventSource
+        from src.open_llm_vtuber.conversations.single_conversation import _turn_source
+        import numpy as np
+
+        assert (
+            _turn_source(np.zeros(16000, dtype=np.float32)) == EventSource.USER_VOICE
+        )
+        assert _turn_source("hello text") == EventSource.USER_TEXT
+        assert (
+            _turn_source(metadata={"proactive_speak": True}) == EventSource.PROACTIVE
+        )

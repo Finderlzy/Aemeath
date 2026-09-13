@@ -341,3 +341,75 @@ class TestHistoryRestoration:
         joined = " ".join(m["content"] for m in agent._memory_messages)
         assert "保留这条消息" in joined or store.get_message(keep_id) is not None
         assert "删除这条消息" not in joined, "deleted content returned to the prompt"
+
+
+class TestMemorySemanticPromptFlow:
+    """Production flow regression for memory prompt states: disabled, failed, empty, hits."""
+
+    async def test_unconfigured_embedding_raises_and_prompts_disabled(self, make_harness):
+        """When embedding is not configured, recall raises and prompt says disabled."""
+        from aemeath.memory import MemoryNotConfiguredError
+
+        llm = FakeLLM(["好。"])
+        harness = make_harness(llm=llm, embedding=None)
+        # Verify recall directly raises MemoryNotConfiguredError
+        with pytest.raises(MemoryNotConfiguredError):
+            await harness.runtime.memory.store.recall("我住在哪")
+
+        # Verify production turn builds disabled prompt
+        await run_turn(harness, "我住在哪")
+        assert len(llm.calls) == 1
+        system_prompt = llm.calls[0]["system_prompt"]
+        assert "注意：未启用长期记忆检索" in system_prompt
+        assert "本轮没有检索到相关记忆" not in system_prompt
+
+    async def test_retrieval_failure_prompts_failed(self, make_harness):
+        """When embedding retrieval throws an exception, prompt says failed."""
+        class FailingEmbedding(FakeEmbeddingAdapter):
+            async def embed(self, texts):
+                raise RuntimeError("network timeout to embedding service")
+
+        llm = FakeLLM(["好。"])
+        failing_emb = FailingEmbedding()
+        harness = make_harness(llm=llm, embedding=failing_emb)
+        store = harness.runtime.memory.store
+        mem_id = store.add_memory(content="测试记忆", kind="fact")
+        import numpy as np
+        store.store_embedding(mem_id, np.array([0.1] * 64, dtype=np.float32))
+
+        await run_turn(harness, "我住在哪")
+        assert len(llm.calls) == 1
+        system_prompt = llm.calls[0]["system_prompt"]
+        assert "注意：本轮记忆检索暂时失败" in system_prompt
+        assert "本轮没有检索到相关记忆" not in system_prompt
+
+    async def test_no_hits_prompts_empty(self, make_harness):
+        """When retrieval succeeds with empty hits, prompt says no memory found."""
+        llm = FakeLLM(["好。"])
+        harness = make_harness(llm=llm, embedding=FakeEmbeddingAdapter())
+        await run_turn(harness, "今天天气怎么样")
+        assert len(llm.calls) == 1
+        system_prompt = llm.calls[0]["system_prompt"]
+        assert "本轮没有检索到相关记忆" in system_prompt
+        assert "未启用长期记忆检索" not in system_prompt
+        assert "检索暂时失败" not in system_prompt
+
+    async def test_recovery_with_memory_prompts_hits(self, make_harness):
+        """After memory is added, turn prompt includes retrieved memories."""
+        llm = FakeLLM(["好。"])
+        embedding = FakeEmbeddingAdapter()
+        harness = make_harness(
+            llm=llm,
+            embedding=embedding,
+            aemeath_overrides={"memory": {"similarity_floor": 0.15}},
+        )
+        store = harness.runtime.memory.store
+        store.add_memory(content="用户住在杭州", kind="fact")
+        await store.reindex()
+
+        await run_turn(harness, "我住在哪里？")
+        assert len(llm.calls) == 1
+        system_prompt = llm.calls[0]["system_prompt"]
+        assert "相关记忆：" in system_prompt
+        assert "用户住在杭州" in system_prompt
+        assert "确实记得" in system_prompt

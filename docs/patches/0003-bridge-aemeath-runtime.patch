@@ -80,7 +80,7 @@ index 02286e9..95b0be9 100644
              tts_text=tts_text,
              display_text=display_text,
 diff --git a/src/open_llm_vtuber/conversations/single_conversation.py b/src/open_llm_vtuber/conversations/single_conversation.py
-index 493fa9c..d3e1062 100644
+index 493fa9c..429de92 100644
 --- a/src/open_llm_vtuber/conversations/single_conversation.py
 +++ b/src/open_llm_vtuber/conversations/single_conversation.py
 @@ -48,6 +48,8 @@ async def process_single_conversation(
@@ -92,7 +92,12 @@ index 493fa9c..d3e1062 100644
  
      try:
          # Send initial signals
-@@ -59,6 +61,19 @@ async def process_single_conversation(
+@@ -55,10 +57,25 @@ async def process_single_conversation(
+         logger.info(f"New Conversation Chain {session_emoji} started!")
+ 
+         # Process user input
++        raw_user_input = user_input
+         input_text = await process_user_input(
              user_input, context.asr_engine, websocket_send
          )
  
@@ -100,11 +105,12 @@ index 493fa9c..d3e1062 100644
 +        # enters through the bridge so the coordinator, not this function,
 +        # decides what is allowed to be produced.
 +        if bridge is not None:
-+            turn_id = str(await bridge.begin_user_turn(source=_turn_source(metadata)))
++            source = _turn_source(raw_user_input, metadata)
++            turn_id = str(await bridge.begin_user_turn(source=source))
 +            if context.history_uid:
 +                bridge.set_history_uid(context.history_uid)
 +            ack = await bridge.on_user_message(
-+                input_text, source=_turn_source(metadata), turn_id=turn_id
++                input_text, source=source, turn_id=turn_id
 +            )
 +            if ack:
 +                await bridge.send_display_text(turn_id, ack)
@@ -112,7 +118,7 @@ index 493fa9c..d3e1062 100644
          # Create batch input
          batch_input = create_batch_input(
              input_text=input_text,
-@@ -70,13 +85,18 @@ async def process_single_conversation(
+@@ -70,13 +87,18 @@ async def process_single_conversation(
          # Store user message (check if we should skip storing to history)
          skip_history = metadata and metadata.get("skip_history", False)
          if context.history_uid and not skip_history:
@@ -138,7 +144,7 @@ index 493fa9c..d3e1062 100644
  
          if skip_history:
              logger.debug("Skipping storing user input to history (proactive speak)")
-@@ -110,6 +130,8 @@ async def process_single_conversation(
+@@ -110,6 +132,8 @@ async def process_single_conversation(
                          websocket_send=websocket_send,  # Pass websocket_send for audio/tts messages
                          tts_manager=tts_manager,
                          translate_engine=context.translate_engine,
@@ -147,7 +153,7 @@ index 493fa9c..d3e1062 100644
                      )
                      # Ensure response_part is treated as a string before concatenation
                      response_part_str = (
-@@ -149,26 +171,57 @@ async def process_single_conversation(
+@@ -149,26 +173,59 @@ async def process_single_conversation(
          )
  
          if context.history_uid and full_response:  # Check full_response before storing
@@ -206,12 +212,14 @@ index 493fa9c..d3e1062 100644
          cleanup_conversation(tts_manager, session_emoji)
 +
 +
-+def _turn_source(metadata: Optional[Dict[str, Any]]):
-+    """Map upstream metadata onto an Aemeath event source."""
++def _turn_source(user_input: Any = None, metadata: Optional[Dict[str, Any]] = None):
++    """Map upstream metadata and raw input onto an Aemeath event source."""
 +    from aemeath.interfaces import EventSource
 +
 +    if metadata and metadata.get("proactive_speak"):
 +        return EventSource.PROACTIVE
++    if isinstance(user_input, np.ndarray) or (metadata and metadata.get("source") == "user_voice"):
++        return EventSource.USER_VOICE
 +    return EventSource.USER_TEXT
 diff --git a/src/open_llm_vtuber/conversations/tts_manager.py b/src/open_llm_vtuber/conversations/tts_manager.py
 index 59c36b7..3733f52 100644
@@ -438,7 +446,7 @@ index e73dd4a..d4f3c88 100644
          """Initialize or update the translation engine based on the configuration."""
  
 diff --git a/src/open_llm_vtuber/websocket_handler.py b/src/open_llm_vtuber/websocket_handler.py
-index 41368a6..f836b09 100644
+index 41368a6..330d847 100644
 --- a/src/open_llm_vtuber/websocket_handler.py
 +++ b/src/open_llm_vtuber/websocket_handler.py
 @@ -43,6 +43,19 @@ class MessageType(Enum):
@@ -694,7 +702,7 @@ index 41368a6..f836b09 100644
          await websocket.send_text(
              json.dumps(
                  {
-@@ -610,3 +751,249 @@ class WebSocketHandler:
+@@ -610,3 +751,257 @@ class WebSocketHandler:
              await websocket.send_json({"type": "heartbeat-ack"})
          except Exception as e:
              logger.error(f"Error sending heartbeat acknowledgment: {e}")
@@ -851,7 +859,9 @@ index 41368a6..f836b09 100644
 +            return
 +        await bridge.on_display_receipt(turn_id=turn_id)
 +        await bridge.on_display_text_shown(
-+            turn_id=turn_id, client_elapsed_ms=data.get("client_elapsed_ms")
++            turn_id=turn_id,
++            client_elapsed_ms=data.get("client_elapsed_ms"),
++            sample_source=data.get("sample_source"),
 +        )
 +
 +    async def _handle_aemeath_playback_receipt(
@@ -872,7 +882,10 @@ index 41368a6..f836b09 100644
 +            )
 +        else:
 +            await bridge.on_playback_started(
-+                turn_id=turn_id, audio_slice_id=slice_id, client_elapsed_ms=elapsed
++                turn_id=turn_id,
++                audio_slice_id=slice_id,
++                client_elapsed_ms=elapsed,
++                sample_source=data.get("sample_source"),
 +            )
 +
 +    async def _handle_aemeath_cancel_receipt(
@@ -885,7 +898,10 @@ index 41368a6..f836b09 100644
 +        turn_id = str(data.get("turn_id") or "")
 +        if turn_id:
 +            await bridge.on_cancel_complete(
-+                turn_id=turn_id, client_elapsed_ms=data.get("client_elapsed_ms")
++                turn_id=turn_id,
++                client_elapsed_ms=data.get("client_elapsed_ms"),
++                sample_source=data.get("sample_source"),
++                trigger=data.get("trigger"),
 +            )
 +
 +    async def _handle_aemeath_memory_query(

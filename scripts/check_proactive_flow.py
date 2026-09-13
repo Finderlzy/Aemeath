@@ -36,6 +36,9 @@ from tests.doubles import FakeLLM, FakeScreenCapture, FakeVision, FakeWindow
 
 async def run_verification():
     report = {
+        "test_type": "isolated_test_with_doubles",
+        "is_live_acceptance": False,
+        "note": "This is an isolated unit/integration regression with doubles, not live acceptance.",
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "environment": {
             "os": "Windows",
@@ -281,13 +284,17 @@ async def run_verification():
         "status": "PASS",
     })
 
-    # Write report
-    report_path = ROOT_DIR / "logs" / "acceptance" / "proactive_flow_report.json"
+    # Write reports (both isolated test file and legacy compatibility path)
+    report_path = ROOT_DIR / "logs" / "acceptance" / "proactive_flow_isolated_test.json"
     report_path.parent.mkdir(parents=True, exist_ok=True)
     with open(report_path, "w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
 
-    print(f"\nVerification successfully completed! Report saved to {report_path}")
+    legacy_path = ROOT_DIR / "logs" / "acceptance" / "proactive_flow_report.json"
+    with open(legacy_path, "w", encoding="utf-8") as f:
+        json.dump(report, f, ensure_ascii=False, indent=2)
+
+    print(f"\nVerification successfully completed! Isolated test report saved to {report_path}")
 
 
 if __name__ == "__main__":

@@ -456,6 +456,10 @@ class AemeathBridge:
                 conversation_id=self._history_uid,
             )
         ack = await self._coordinator.observe_user_text_ordered(text)
+        if ack:
+            await self.send_state(reason="state changed by user message")
+            if self._situation.state.mode is SpeechMode.CLASS:
+                await self.send_clear_audio(reason="class mode entered")
         return ack
 
     async def switch_mode(self, mode: SpeechMode) -> SituationState:
@@ -841,36 +845,71 @@ class AemeathBridge:
     # Receipts from the client
     # ------------------------------------------------------------------
 
-    async def on_playback_started(self, *, turn_id: str, audio_slice_id: str,
-                                  client_elapsed_ms: Optional[float] = None) -> None:
+    async def on_playback_started(
+        self,
+        *,
+        turn_id: str,
+        audio_slice_id: str,
+        client_elapsed_ms: Optional[float] = None,
+        sample_source: Optional[str] = None,
+    ) -> None:
         """Record that the client actually began playing an audio slice."""
         session = self._session
         if session is not None:
             session.played_slices.add(audio_slice_id)
         if self._metrics is not None:
             self._metrics.mark_playback_started(
-                turn_id, audio_slice_id, client_elapsed_ms=client_elapsed_ms
+                turn_id,
+                audio_slice_id,
+                client_elapsed_ms=client_elapsed_ms,
+                sample_source=sample_source,
             )
 
-    async def on_playback_finished(self, *, turn_id: str, audio_slice_id: str,
-                                   client_elapsed_ms: Optional[float] = None) -> None:
+    async def on_playback_finished(
+        self,
+        *,
+        turn_id: str,
+        audio_slice_id: str,
+        client_elapsed_ms: Optional[float] = None,
+        sample_source: Optional[str] = None,
+    ) -> None:
         """Record that a slice finished playing on the client."""
         if self._metrics is not None:
             self._metrics.mark_playback_finished(
                 turn_id, audio_slice_id, client_elapsed_ms=client_elapsed_ms
             )
 
-    async def on_display_text_shown(self, *, turn_id: str,
-                                    client_elapsed_ms: Optional[float] = None) -> None:
+    async def on_display_text_shown(
+        self,
+        *,
+        turn_id: str,
+        client_elapsed_ms: Optional[float] = None,
+        sample_source: Optional[str] = None,
+    ) -> None:
         """Record that display text actually reached the screen."""
         if self._metrics is not None:
-            self._metrics.mark_text_displayed(turn_id, client_elapsed_ms=client_elapsed_ms)
+            self._metrics.mark_text_displayed(
+                turn_id,
+                client_elapsed_ms=client_elapsed_ms,
+                sample_source=sample_source,
+            )
 
-    async def on_cancel_complete(self, *, turn_id: str,
-                                 client_elapsed_ms: Optional[float] = None) -> None:
+    async def on_cancel_complete(
+        self,
+        *,
+        turn_id: str,
+        client_elapsed_ms: Optional[float] = None,
+        sample_source: Optional[str] = None,
+        trigger: Optional[str] = None,
+    ) -> None:
         """Record that the client finished stopping playback for a cancel."""
         if self._metrics is not None:
-            self._metrics.mark_cancel_complete(turn_id, client_elapsed_ms=client_elapsed_ms)
+            self._metrics.mark_cancel_complete(
+                turn_id,
+                client_elapsed_ms=client_elapsed_ms,
+                sample_source=sample_source,
+                trigger=trigger,
+            )
 
     async def on_client_activity(self, *, typing: bool = False,
                                  voice_active: bool = False) -> None:

@@ -20,11 +20,19 @@ from typing import Iterable, Optional
 
 from .interfaces import EventSource, MemoryRecord, SituationState, ScreenObservation
 
-# Explicitly stated so a failure to retrieve is not silently filled in.
-_MEMORY_UNAVAILABLE_RULE = (
-    "注意：本轮记忆检索不可用。你不知道任何关于用户的历史信息，"
+# Explicitly stated so disabled memory, retrieval failures and empty hits are distinct.
+_MEMORY_DISABLED_RULE = (
+    "注意：未启用长期记忆检索。你不知道任何关于用户的历史信息，"
     "不要假装记得，也不要编造用户的偏好、经历或安排。"
 )
+
+_MEMORY_FAILED_RULE = (
+    "注意：本轮记忆检索暂时失败（检索不可用）。你不知道任何关于用户的历史信息，"
+    "不要假装记得，也不要编造用户的偏好、经历或安排。"
+)
+
+# Retained as an alias for backwards compatibility.
+_MEMORY_UNAVAILABLE_RULE = _MEMORY_FAILED_RULE
 
 _NO_MEMORY_RULE = (
     "本轮没有检索到相关记忆。没有出现在上面的内容，你就是不知道；"
@@ -99,6 +107,7 @@ def build_system_prompt(
     situation: SituationState,
     memories: Iterable[MemoryRecord] = (),
     memory_available: bool = True,
+    memory_status: Optional[str] = None,
     recent_turns: int = 12,
 ) -> str:
     """Build the system prompt for a turn.
@@ -107,7 +116,10 @@ def build_system_prompt(
         persona: Base persona text from the character configuration.
         situation: Current situation state.
         memories: Memories retrieved for this turn.
-        memory_available: Whether retrieval succeeded.
+        memory_available: Backwards-compatible flag; whether retrieval succeeded.
+        memory_status: Explicit memory status: ``disabled`` (not configured),
+            ``failed`` (retrieval error), ``empty`` (no matching memories), or
+            ``hits`` (relevant memories found).
         recent_turns: Size of the working context window (documentation only).
 
     Returns:
@@ -116,9 +128,20 @@ def build_system_prompt(
     parts = [persona.strip()]
 
     memory_list = list(memories)
-    if not memory_available:
-        parts.append(_MEMORY_UNAVAILABLE_RULE)
+    if memory_status is not None:
+        status = memory_status
+    elif not memory_available:
+        status = "failed"
     elif memory_list:
+        status = "hits"
+    else:
+        status = "empty"
+
+    if status == "disabled":
+        parts.append(_MEMORY_DISABLED_RULE)
+    elif status == "failed":
+        parts.append(_MEMORY_FAILED_RULE)
+    elif status == "hits" and memory_list:
         parts.append("相关记忆：\n" + _format_memories(memory_list) + "\n" + _MEMORY_RULE)
     else:
         parts.append(_NO_MEMORY_RULE)
@@ -141,6 +164,7 @@ def build_user_prompt(
     situation: Optional[SituationState] = None,
     has_screen_image: bool = False,
     memory_available: bool = True,
+    memory_status: Optional[str] = None,
     screen_summary: Optional[ScreenObservation] = None,
 ) -> str:
     """Build the user-facing content for a turn.

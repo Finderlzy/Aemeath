@@ -322,8 +322,19 @@ class TestSystemPromptRules:
     """The honesty contract must be present in generated prompts."""
 
     def test_no_memory_rule_without_memories(self):
-        prompt = build_system_prompt(persona="你是 Aemeath。", situation=SituationState())
+        prompt = build_system_prompt(persona="你是 Aemeath。", situation=SituationState(), memory_status="empty")
+        assert "本轮没有检索到相关记忆" in prompt
         assert "不知道" in prompt
+
+    def test_memory_disabled_rule(self):
+        prompt = build_system_prompt(persona="你是 Aemeath。", situation=SituationState(), memory_status="disabled")
+        assert "未启用长期记忆检索" in prompt
+        assert "本轮没有检索到相关记忆" not in prompt
+
+    def test_memory_failed_rule(self):
+        prompt = build_system_prompt(persona="你是 Aemeath。", situation=SituationState(), memory_status="failed")
+        assert "本轮记忆检索暂时失败" in prompt
+        assert "本轮没有检索到相关记忆" not in prompt
 
     def test_memory_rule_with_memories(self):
         from aemeath.interfaces import MemoryRecord

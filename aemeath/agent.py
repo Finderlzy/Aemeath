@@ -51,6 +51,7 @@ from src.open_llm_vtuber.agent.transformers import (
 from src.open_llm_vtuber.config_manager import TTSPreprocessorConfig
 
 from .interfaces import EventSource, SituationState, TurnId
+from .memory import MemoryNotConfiguredError
 from .prompts import build_system_prompt, build_user_prompt
 
 # Upstream sends this marker into the conversation stream when the user
@@ -333,14 +334,28 @@ class AemeathAgent(AgentInterface):
 
         memories = []
         memory_available = True
+        memory_status = "disabled" if self._memory is None else "empty"
+
+        store = getattr(self._memory, "store", None)
+        if store is not None and getattr(store, "_embedding", None) is None:
+            memory_status = "disabled"
+            memory_available = False
+
         # A greeting or a mode switch does not need an embedding round-trip.
         if self._memory is not None and user_text and self._is_user_source(source):
             try:
                 memories = await self._memory.recall(user_text)
+                memory_status = "hits" if memories else "empty"
+                memory_available = True
+            except MemoryNotConfiguredError as exc:
+                memory_available = False
+                memory_status = "disabled"
+                logger.info("Memory recall is disabled: {}", exc)
             except Exception as exc:
                 # Retrieval failure must be visible, and must not be papered
                 # over by pretending we remembered something.
                 memory_available = False
+                memory_status = "failed"
                 logger.error("Memory recall failed; continuing without it: {}", exc)
 
         # Read the situation once per turn, at prompt-assembly time. Holding a
@@ -362,6 +377,7 @@ class AemeathAgent(AgentInterface):
             situation=situation,
             has_screen_image=has_image,
             memory_available=memory_available,
+            memory_status=memory_status,
             screen_summary=screen_summary,
         )
 
@@ -370,6 +386,7 @@ class AemeathAgent(AgentInterface):
             situation=situation,
             memories=memories,
             memory_available=memory_available,
+            memory_status=memory_status,
             recent_turns=self._recent_turn_limit(),
         )
 

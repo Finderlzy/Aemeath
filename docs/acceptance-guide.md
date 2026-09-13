@@ -159,6 +159,23 @@ $py = ".\vendor\Open-LLM-VTuber\.venv\Scripts\python.exe"
 样本必须来自客户端同一单调时钟。失败、取消与缺失回执**单独统计**，
 不能只挑成功的快样本。后端 ASR/模型/TTS 耗时只用于定位瓶颈。
 
+**采样来源标记（2026-09-13 起）**：回执会带上 `sample_source`，只有下列组合计入有效样本，
+其余记录保留但不进入验收统计：
+
+| 指标 | 有效 `sample_source` | 前置条件 |
+| --- | --- | --- |
+| 首段文字 | `user_text_input` | 由客户端在提交输入时开始计时 |
+| 语音回复 | `microphone_vad` | 该轮来源为 `user_voice`，计时从 VAD 判定说话结束开始 |
+| 点击停止 | `click_stop` | 点击时确有音频正在播放；无播放的点击不算样本 |
+
+口径审计与进度统计：
+
+```powershell
+$py = ".\vendor\Open-LLM-VTuber\.venv\Scripts\python.exe"
+& $py scripts\audit_latency_metrics.py          # 有效样本、P50/P95、待核与无效样本
+& $py scripts\monitor_acceptance_progress.py    # 现场采录进度
+```
+
 ### E. 两次各 30 分钟试用
 
 **第一次：工作陪伴**

@@ -239,7 +239,7 @@ index 0000000..a16369f
 +  );
 +}
 diff --git a/src/renderer/src/context/vad-context.tsx b/src/renderer/src/context/vad-context.tsx
-index f38a4e6..f521da7 100644
+index f38a4e6..5f7a246 100644
 --- a/src/renderer/src/context/vad-context.tsx
 +++ b/src/renderer/src/context/vad-context.tsx
 @@ -11,6 +11,7 @@ import { SubtitleContext } from './subtitle-context';
@@ -250,17 +250,31 @@ index f38a4e6..f521da7 100644
  
  /**
   * VAD settings configuration interface
-@@ -240,6 +241,8 @@ export function VADProvider({ children }: { children: React.ReactNode }) {
+@@ -240,6 +241,9 @@ export function VADProvider({ children }: { children: React.ReactNode }) {
      }
  
      setPreviousTriggeredProbability(0);
 +    aemeathProtocol.resetCancelledAll();
++    aemeathProtocol.timing.beginVoiceInput(aemeathProtocol.generation);
 +    (window as any).__aemeathTiming?.beginPlayback?.();
      sendAudioPartitionRef.current(audio);
      isProcessingRef.current = false;
      setAiStateRef.current("thinking-speaking");
+diff --git a/src/renderer/src/hooks/footer/use-footer.ts b/src/renderer/src/hooks/footer/use-footer.ts
+index 34865fa..ca2b79c 100644
+--- a/src/renderer/src/hooks/footer/use-footer.ts
++++ b/src/renderer/src/hooks/footer/use-footer.ts
+@@ -34,7 +34,7 @@ export const useFooter = () => {
+ 
+   const handleInterrupt = () => {
+     if (aiState === AiStateEnum.THINKING_SPEAKING) {
+-      interrupt();
++      interrupt(true, 'click');
+       if (autoStartMicOn) {
+         startMic();
+       }
 diff --git a/src/renderer/src/hooks/footer/use-text-input.tsx b/src/renderer/src/hooks/footer/use-text-input.tsx
-index d2499ff..3fa66f5 100644
+index d2499ff..fa7e3ba 100644
 --- a/src/renderer/src/hooks/footer/use-text-input.tsx
 +++ b/src/renderer/src/hooks/footer/use-text-input.tsx
 @@ -4,6 +4,7 @@ import { useAiState } from '@/context/ai-state-context';
@@ -271,7 +285,7 @@ index d2499ff..3fa66f5 100644
  import { useMediaCapture } from '@/hooks/utils/use-media-capture';
  
  export function useTextInput() {
-@@ -25,10 +26,25 @@ export function useTextInput() {
+@@ -25,10 +26,26 @@ export function useTextInput() {
      if (aiState === 'thinking-speaking') {
        interrupt();
      }
@@ -292,13 +306,14 @@ index d2499ff..3fa66f5 100644
 +    // for this send arrives. Without this call no ``aemeath-display-receipt``
 +    // is ever sent and every client_first_text_ms arrives null, which would
 +    // leave the latency target permanently at "no samples".
++    aemeathProtocol.timing.beginTextInput(aemeathProtocol.generation);
 +    (window as any).__aemeathTiming?.beginTextPending?.();
 +
      wsContext.sendMessage({
        type: 'text-input',
        text: inputText.trim(),
 diff --git a/src/renderer/src/hooks/utils/use-audio-task.ts b/src/renderer/src/hooks/utils/use-audio-task.ts
-index 27cba68..60b858f 100644
+index 27cba68..6f23229 100644
 --- a/src/renderer/src/hooks/utils/use-audio-task.ts
 +++ b/src/renderer/src/hooks/utils/use-audio-task.ts
 @@ -12,6 +12,7 @@ import { toaster } from '@/components/ui/toaster';
@@ -349,7 +364,7 @@ index 27cba68..60b858f 100644
          let isFinished = false;
  
          const cleanup = () => {
-@@ -172,12 +190,33 @@ export const useAudioTask = () => {
+@@ -172,12 +190,36 @@ export const useAudioTask = () => {
              return;
            }
  
@@ -369,21 +384,24 @@ index 27cba68..60b858f 100644
  
 +          // Report that playback actually began, with the client-measured
 +          // duration since the user stopped speaking.
-+          const elapsed = (window as any).__aemeathTiming?.playbackElapsed?.();
++          // Only voice inputs (from VAD speech end) produce a valid voice latency sample.
++          const voiceElapsed = aemeathProtocol.timing.consumeVoiceInput(aemeathProtocol.generation);
 +          if (options.audioSliceId || options.turnId) {
 +            sendMessage({
 +              type: 'aemeath-playback-receipt',
 +              phase: 'started',
 +              turn_id: options.turnId ?? null,
 +              audio_slice_id: options.audioSliceId ?? null,
-+              client_elapsed_ms: elapsed ?? null,
++              client_elapsed_ms: voiceElapsed !== null ? voiceElapsed : null,
++              sample_source: voiceElapsed !== null ? 'microphone_vad' : undefined,
++              generation: aemeathProtocol.generation,
 +            });
 +          }
 +
            // Setup lip sync
            if (model._wavFileHandler) {
              if (!model._wavFileHandler._initialized) {
-@@ -203,6 +242,15 @@ export const useAudioTask = () => {
+@@ -203,6 +245,15 @@ export const useAudioTask = () => {
  
          audio.addEventListener('ended', () => {
            console.log("Audio playback completed");
@@ -400,7 +418,7 @@ index 27cba68..60b858f 100644
          });
  
 diff --git a/src/renderer/src/hooks/utils/use-interrupt.ts b/src/renderer/src/hooks/utils/use-interrupt.ts
-index 5986aa2..7664fa0 100644
+index 5986aa2..d48f21e 100644
 --- a/src/renderer/src/hooks/utils/use-interrupt.ts
 +++ b/src/renderer/src/hooks/utils/use-interrupt.ts
 @@ -4,6 +4,8 @@ import { useChatHistory } from '@/context/chat-history-context';
@@ -412,11 +430,17 @@ index 5986aa2..7664fa0 100644
  
  export const useInterrupt = () => {
    const { aiState, setAiState } = useAiState();
-@@ -17,11 +19,31 @@ export const useInterrupt = () => {
+@@ -13,15 +15,40 @@ export const useInterrupt = () => {
+   const { subtitleText, setSubtitleText } = useSubtitle();
+   const { stopCurrentAudioAndLipSync } = useAudioTask();
+ 
+-  const interrupt = (sendSignal = true) => {
++  const interrupt = (sendSignal = true, trigger: 'click' | 'voice' = 'click') => {
      if (aiState !== 'thinking-speaking') return;
      console.log('Interrupting conversation chain');
  
-+    const currentTurnId = audioManager.getCurrentTurnId() || (aemeathProtocol as any).latestTurnId || '';
++    const hasAudio = audioManager.hasCurrentAudio();
++    const currentTurnId = audioManager.getCurrentTurnId();
 +    const t0 = performance.now();
 +
 +    // Mark every in-flight turn cancelled first, so audio that is still
@@ -434,11 +458,15 @@ index 5986aa2..7664fa0 100644
 +      setAiState((curr) => (curr === 'interrupted' ? 'idle' : curr));
 +    }, 800);
 +
-+    if (currentTurnId) {
++    // Only active audio playback being stopped counts as a valid stop sample
++    if (hasAudio && currentTurnId) {
 +      sendMessage({
 +        type: 'aemeath-cancel-receipt',
 +        turn_id: currentTurnId,
 +        client_elapsed_ms: elapsed,
++        sample_source: trigger === 'click' ? 'click_stop' : 'voice_interrupt',
++        trigger: trigger,
++        generation: aemeathProtocol.generation,
 +      });
 +    }
  
@@ -446,10 +474,10 @@ index 5986aa2..7664fa0 100644
        sendMessage({
 diff --git a/src/renderer/src/services/aemeath-protocol.ts b/src/renderer/src/services/aemeath-protocol.ts
 new file mode 100644
-index 0000000..5154b61
+index 0000000..ecfade6
 --- /dev/null
 +++ b/src/renderer/src/services/aemeath-protocol.ts
-@@ -0,0 +1,180 @@
+@@ -0,0 +1,249 @@
 +/* eslint-disable @typescript-eslint/no-explicit-any */
 +/**
 + * Aemeath client protocol state.
@@ -508,6 +536,9 @@ index 0000000..5154b61
 +  /** Whether the client negotiated the Aemeath protocol at all. */
 +  negotiated = false;
 +
++  /** Timing tracker strictly bound to generations and specific inputs. */
++  timing: TimingTracker = new TimingTracker();
++
 +  /**
 +   * Handle a state update from the backend.
 +   *
@@ -534,6 +565,7 @@ index 0000000..5154b61
 +    this.cancelledTurns.clear();
 +    this.playedSlices.clear();
 +    this.stateVersion = 0;
++    this.timing.resetAll();
 +  }
 +
 +  /** Mark a turn cancelled so its late frames are refused. */
@@ -628,10 +660,75 @@ index 0000000..5154b61
 +  return Date.now();
 +}
 +
++interface TimingEntry {
++  generation: number;
++  startedAt: number;
++  claimed: boolean;
++  source: string;
++}
++
++export class TimingTracker {
++  private voiceInput: TimingEntry | null = null;
++  private textInput: TimingEntry | null = null;
++
++  beginVoiceInput(generation: number): void {
++    this.voiceInput = {
++      generation,
++      startedAt: now(),
++      claimed: false,
++      source: 'microphone_vad',
++    };
++  }
++
++  consumeVoiceInput(generation: number): number | null {
++    if (!this.voiceInput || this.voiceInput.claimed) return null;
++    if (this.voiceInput.generation !== generation) {
++      this.voiceInput = null;
++      return null;
++    }
++    const elapsed = Math.max(0, now() - this.voiceInput.startedAt);
++    this.voiceInput.claimed = true;
++    return elapsed;
++  }
++
++  clearVoiceInput(): void {
++    this.voiceInput = null;
++  }
++
++  beginTextInput(generation: number): void {
++    this.textInput = {
++      generation,
++      startedAt: now(),
++      claimed: false,
++      source: 'user_text_input',
++    };
++  }
++
++  consumeTextInput(generation: number): number | null {
++    if (!this.textInput || this.textInput.claimed) return null;
++    if (this.textInput.generation !== generation) {
++      this.textInput = null;
++      return null;
++    }
++    const elapsed = Math.max(0, now() - this.textInput.startedAt);
++    this.textInput.claimed = true;
++    return elapsed;
++  }
++
++  clearTextInput(): void {
++    this.textInput = null;
++  }
++
++  resetAll(): void {
++    this.voiceInput = null;
++    this.textInput = null;
++  }
++}
++
 +/** Shared protocol state for the whole client. */
 +export const aemeathProtocol = new AemeathProtocolState();
 diff --git a/src/renderer/src/services/websocket-handler.tsx b/src/renderer/src/services/websocket-handler.tsx
-index 5283617..46646af 100644
+index 5283617..0d548f4 100644
 --- a/src/renderer/src/services/websocket-handler.tsx
 +++ b/src/renderer/src/services/websocket-handler.tsx
 @@ -5,7 +5,7 @@ import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
@@ -726,7 +823,7 @@ index 5283617..46646af 100644
          setAiState('thinking-speaking');
          audioTaskQueue.clearQueue();
          clearResponse();
-@@ -91,8 +142,130 @@ function WebSocketHandler({ children }: { children: React.ReactNode }) {
+@@ -91,8 +142,144 @@ function WebSocketHandler({ children }: { children: React.ReactNode }) {
      }
    }, [setAiState, clearResponse, setForceNewMessage, startMic, stopMic]);
  
@@ -789,16 +886,30 @@ index 5283617..46646af 100644
 +        // Text display is independent of audio; class mode still shows this.
 +        if (anyMessage.text) {
 +          setSubtitleText(anyMessage.text);
-+          const watch = textStopwatchRef.current;
-+          // Accept either an already-bound stopwatch or a pending one opened
-+          // on send, which this first reply now binds to its turn id.
-+          if (watch && (watch.pending || watch.turnId === anyMessage.turn_id)) {
++          const elapsed = aemeathProtocol.timing.consumeTextInput(aemeathProtocol.generation);
++          if (elapsed !== null && anyMessage.turn_id) {
 +            sendMessage({
 +              type: 'aemeath-display-receipt',
 +              turn_id: anyMessage.turn_id,
-+              client_elapsed_ms: watch.watch.elapsed(),
++              client_elapsed_ms: elapsed,
++              sample_source: 'user_text_input',
++              generation: aemeathProtocol.generation,
 +            });
 +            textStopwatchRef.current = null;
++          } else {
++            const watch = textStopwatchRef.current;
++            // Accept either an already-bound stopwatch or a pending one opened
++            // on send, which this first reply now binds to its turn id.
++            if (watch && (watch.pending || watch.turnId === anyMessage.turn_id)) {
++              sendMessage({
++                type: 'aemeath-display-receipt',
++                turn_id: anyMessage.turn_id,
++                client_elapsed_ms: watch.watch.elapsed(),
++                sample_source: 'user_text_input',
++                generation: aemeathProtocol.generation,
++              });
++              textStopwatchRef.current = null;
++            }
 +          }
 +        }
 +        return true;
@@ -857,7 +968,7 @@ index 5283617..46646af 100644
      switch (message.type) {
        case 'control':
          if (message.text) {
-@@ -153,9 +326,25 @@ function WebSocketHandler({ children }: { children: React.ReactNode }) {
+@@ -153,9 +340,25 @@ function WebSocketHandler({ children }: { children: React.ReactNode }) {
          }
          break;
        case 'audio':
@@ -884,7 +995,7 @@ index 5283617..46646af 100644
            console.log("actions", message.actions);
            addAudioTask({
              audioBase64: message.audio || '',
-@@ -164,6 +353,8 @@ function WebSocketHandler({ children }: { children: React.ReactNode }) {
+@@ -164,6 +367,8 @@ function WebSocketHandler({ children }: { children: React.ReactNode }) {
              displayText: message.display_text || null,
              expressions: message.actions?.expressions || null,
              forwarded: message.forwarded || false,
@@ -893,7 +1004,7 @@ index 5283617..46646af 100644
            });
          }
          break;
-@@ -289,7 +480,7 @@ function WebSocketHandler({ children }: { children: React.ReactNode }) {
+@@ -289,7 +494,7 @@ function WebSocketHandler({ children }: { children: React.ReactNode }) {
        default:
          console.warn('Unknown message type:', message.type);
      }

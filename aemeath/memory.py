@@ -36,6 +36,10 @@ from loguru import logger
 from .adapters import EmbeddingAdapter, ExtractedFact, ExtractionAdapter
 from .interfaces import MemoryRecord
 
+
+class MemoryNotConfiguredError(RuntimeError):
+    """Raised when memory retrieval is attempted but embedding is not configured."""
+
 SCHEMA_VERSION = 2
 
 _SCHEMA = """
@@ -1337,13 +1341,17 @@ class MemoryStore:
             the floor.
 
         Raises:
+            MemoryNotConfiguredError: Propagated when the embedding provider is
+                not configured, distinguishing unconfigured from an empty result.
             Exception: Propagates embedding failures so callers can report that
                 memory retrieval is unavailable instead of pretending to recall.
         """
         if not query.strip():
             return []
         if self._embedding is None:
-            return []
+            raise MemoryNotConfiguredError(
+                "Embedding provider is not configured for memory retrieval."
+            )
 
         ids, matrix = self.load_vectors()
         if not ids:

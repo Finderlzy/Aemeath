@@ -23,9 +23,10 @@ Windows 桌面 AI 伙伴，角色原型为《鸣潮》爱弥斯。首期以 **Op
 
 - **统一桥接与仲裁**：所有进出站交互经由 `aemeath/coordinator.py` 和 `aemeath/bridge.py`，确保打断、课堂静音与时序闸门安全。
 - **本地数据边界**：记忆、情境、历史全部存储在本地 SQLite 数据库（`data/aemeath.sqlite3`），不依赖外部云记忆服务。
-- **本地语音支持**：
-  - ASR：基于 sherpa-onnx 本地运行 SenseVoice（小巧、低延迟、多语言转写）。
+- **本地语音与模型支持**：
+  - ASR：基于 sherpa-onnx 本地运行 SenseVoice（离线、低延迟）。
   - TTS：基于本地 GPT-SoVITS HTTP 服务（`http://127.0.0.1:9880/tts`，api_v2）。
+  - Embedding：基于本地 LM Studio 运行 `text-embedding-bge-large-zh-v1.5`（1024 维中文向量），锁定相似度阈值 `0.40`。
 
 ---
 
@@ -34,7 +35,7 @@ Windows 桌面 AI 伙伴，角色原型为《鸣潮》爱弥斯。首期以 **Op
 | 项 | 要求 |
 | --- | --- |
 | 操作系统 | Windows 10/11 x64 |
-| Python | 3.11.16（由 `uv python install 3.11` 安装） |
+| Python | 3.11.16（建议通过 `uv python install 3.11` 安装） |
 | 包管理工具 | `uv` (>= 0.12.0) |
 | Node.js | v20+ (包含 npm) |
 | 代理（国内） | 本机代理（默认 `http://127.0.0.1:7897`），访问 GitHub / PyPI 必需 |
@@ -46,24 +47,25 @@ Windows 桌面 AI 伙伴，角色原型为《鸣潮》爱弥斯。首期以 **Op
 ### 1. 克隆与取得依赖源码
 
 ```powershell
-# 克隆 Aemeath 仓库
+# 1) 克隆 Aemeath 仓库
 git clone https://github.com/Finderlzy/Aemeath.git E:\WorkSpace\Aemeath
 cd E:\WorkSpace\Aemeath
 
-# 拉取上游后端底座与前端子模块
+# 2) 拉取上游后端底座与前端子模块（固定 v1.2.1 / commit 3afa410）
 git -c http.proxy=http://127.0.0.1:7897 clone --depth 1 --branch v1.2.1 `
     https://github.com/Open-LLM-VTuber/Open-LLM-VTuber.git vendor/Open-LLM-VTuber
 git -C vendor/Open-LLM-VTuber -c http.proxy=http://127.0.0.1:7897 submodule update --init --depth 1 frontend
 
-# 拉取客户端源码
-git -c http.proxy=http://127.0.0.1:7897 clone --depth 1 --branch main `
+# 3) 拉取客户端源码并固定到已验证提交 d176e7df2366952e3bacbf12cf9a8b18a4315932
+git -c http.proxy=http://127.0.0.1:7897 clone `
     https://github.com/Open-LLM-VTuber/Open-LLM-VTuber-Web.git vendor/Open-LLM-VTuber-Web
+git -C vendor/Open-LLM-VTuber-Web checkout d176e7df2366952e3bacbf12cf9a8b18a4315932
 ```
 
-### 2. 按序套用补丁
+### 2. 按序套用补丁 (4 后端 + 1 前端)
 
 ```powershell
-# 1) 后端补丁（按序套用，缺一不可）
+# 1) 后端四个补丁（必须按顺序套用）
 cd vendor/Open-LLM-VTuber
 git apply ..\..\docs\patches\0001-register-aemeath-agent.patch
 git apply ..\..\docs\patches\0002-register-aemeath-agent-config.patch
@@ -84,7 +86,7 @@ cd vendor/Open-LLM-VTuber
 $env:HTTP_PROXY='http://127.0.0.1:7897'; $env:HTTPS_PROXY=$env:HTTP_PROXY
 uv sync --frozen --python 3.11
 
-# 补装 Aemeath 专用及冲突依赖
+# 补装 Aemeath 专用及兼容依赖
 uv pip install -r ..\..\requirements.aemeath.txt
 uv pip install "torchaudio==2.6.0" `
     --index-url https://download.pytorch.org/whl/cpu `
@@ -101,7 +103,7 @@ $env:ELECTRON_SKIP_BINARY_DOWNLOAD='1'
 cmd.exe /c "npm.cmd ci --no-audit --no-fund"
 cmd.exe /c "npm.cmd run build:web"
 
-# 部署构建产物到后端服务目录
+# 部署构建产物到后端静态托管目录
 Copy-Item dist\web\assets\* ..\Open-LLM-VTuber\frontend\assets\ -Force
 Copy-Item dist\web\index.html ..\Open-LLM-VTuber\frontend\index.html -Force
 cd ..\..
@@ -109,67 +111,114 @@ cd ..\..
 
 ---
 
-## 四、配置与检查
+## 四、外部与本地模型服务准备
 
-### 1. 环境变量配置
-Aemeath 运行需要注入必要的模型 API 密钥（可配置于启动会话环境）：
-
+### 1. 本地 SenseVoice (ASR) 准备
+SenseVoice 模型随上游 ASR 目录加载，模型放置在：
+`vendor/Open-LLM-VTuber/models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/`。
+可运行麦克风识别验证脚本：
 ```powershell
-$env:AEMEATH_LLM_API_KEY = "sk-..."            # 对话大模型密钥
-$env:AEMEATH_EXTRACTION_API_KEY = "sk-..."     # 记忆提取模型密钥
-$env:AEMEATH_EMBEDDING_API_KEY = "lm-studio"   # 嵌入服务密钥（本地服务可填占位符）
-$env:AEMEATH_VISION_API_KEY = "..."            # 视觉模型密钥
-$env:AEMEATH_TLS_INSECURE = "1"                # 本地代理自签 CA 放宽（如需）
+.\vendor\Open-LLM-VTuber\.venv\Scripts\python.exe scripts\verify_mic_sensevoice.py
 ```
 
-### 2. 运行配置检查
+### 2. 本地 GPT-SoVITS (TTS) 准备、启动与停止
+Aemeath 首期正式语音方案为本地 GPT-SoVITS（`http://127.0.0.1:9880/tts`，api_v2 契约）。
+- **准备模型与参考音频**：在本地部署好的 GPT-SoVITS 目录下放置爱弥斯角色模型权重与参考音频。
+- **启动服务**：使用提供的启动脚本（自动执行 `/openapi.json` 健康探针，超时返回失败退出码 1）：
+  ```powershell
+  powershell -File scripts\start_gpt_sovits.ps1 -Port 9880 -ServiceDir "E:\WorkSpace\Tools\GPT-SoVITS"
+  ```
+- **检查连通性**：
+  ```powershell
+  .\vendor\Open-LLM-VTuber\.venv\Scripts\python.exe scripts\check_gpt_sovits.py
+  ```
+- **停止服务**：
+  ```powershell
+  powershell -File scripts\stop_gpt_sovits.ps1 -Port 9880
+  ```
+
+### 3. 本地 LM Studio (Embedding) 准备
+- 打开 LM Studio，搜索并下载 `text-embedding-bge-large-zh-v1.5`。
+- 在“Local Server”选项卡中选择该模型，端口设为 `1234`，点击“Start Server”（监听 `http://127.0.0.1:1234/v1`）。
+
+---
+
+## 五、配置体系说明：默认模板 vs 实际运行配置
+
+**特别注意**：
+- `config_templates/conf.default.yaml` 与 `conf.default.yaml` 为**默认模板**，仅提供架构字段结构及上游默认 fallback。其中的 `api.example.invalid` 和 `replace-me` 是未配置的占位符，直接使用该配置无法连通外部模型。
+- **实际运行配置**应使用 `conf.yaml` 或专用验收配置（如 `config/acceptance/conf.acceptance.yaml`）。
+
+### 1. 实际配置关键字段对应表
+
+| 模块 | 配置项路径 | 推荐实际取值 / 说明 | 对应环境变量 |
+| --- | --- | --- | --- |
+| 交互 Agent | `agent.agent_type` | `aemeath_agent` | - |
+| 聊天模型 (LLM) | `agent.llm.provider` | `openai_compatible_llm` | - |
+| 聊天端点 | `agent.llm.base_url` | 如 `https://api.deepseek.com/v1` | - |
+| 聊天模型名 | `agent.llm.model` | 如 `deepseek-chat` | - |
+| 聊天密钥 | `agent.llm.api_key` | 可配置或置空读取环境变量 | `$env:AEMEATH_LLM_API_KEY` |
+| 记忆提取模型 | `aemeath.extraction.base_url` | 如 `https://api.deepseek.com/v1` | - |
+| 记忆提取模型名 | `aemeath.extraction.model` | 如 `deepseek-chat` | - |
+| 记忆提取密钥 | `aemeath.extraction.api_key_env` | `AEMEATH_EXTRACTION_API_KEY` | `$env:AEMEATH_EXTRACTION_API_KEY` |
+| 本地嵌入端点 | `aemeath.embedding.base_url` | `http://127.0.0.1:1234/v1` | - |
+| 本地嵌入模型名 | `aemeath.embedding.model` | `text-embedding-bge-large-zh-v1.5` | - |
+| 嵌入服务密钥 | `aemeath.embedding.api_key_env` | `AEMEATH_EMBEDDING_API_KEY` | `$env:AEMEATH_EMBEDDING_API_KEY = "lm-studio"` |
+| 视觉模型端点 | `aemeath.vision.base_url` | 视觉供应商 API 端点 | - |
+| 视觉模型名 | `aemeath.vision.model` | 如 `claude-3-5-sonnet` 或 `gpt-4o` | - |
+| 视觉模型密钥 | `aemeath.vision.api_key_env` | `AEMEATH_VISION_API_KEY` | `$env:AEMEATH_VISION_API_KEY` |
+| 本地 ASR | `asr_model` | `sherpa_onnx_asr` | - |
+| 本地 TTS | `tts_model` | `gpt_sovits_tts` | - |
+
+### 2. 注入环境变量与配置健康检查
+
 ```powershell
-.\vendor\Open-LLM-VTuber\.venv\Scripts\python.exe scripts\check_config.py
-```
-若需要同时探测各真实供应商连通性，可附加 `--live` 参数：
-```powershell
+# 注入实际模型凭据
+$env:AEMEATH_LLM_API_KEY = "sk-..."
+$env:AEMEATH_EXTRACTION_API_KEY = "sk-..."
+$env:AEMEATH_EMBEDDING_API_KEY = "lm-studio"
+$env:AEMEATH_VISION_API_KEY = "..."
+$env:AEMEATH_TLS_INSECURE = "1" # 如使用代理自签证书需开启
+
+# 运行配置静态与端点健康探针
 .\vendor\Open-LLM-VTuber\.venv\Scripts\python.exe scripts\check_config.py --live
 ```
 
 ---
 
-## 五、运行服务
+## 六、启动服务与使用
 
 ```powershell
+# 启动后端服务
 .\vendor\Open-LLM-VTuber\.venv\Scripts\python.exe scripts\run_server.py
 ```
 
-启动后在浏览器打开桌面客户端：
+若使用验收配置，需显式传入（否则读取上游 `conf.yaml`）：
+
+```powershell
+.\vendor\Open-LLM-VTuber\.venv\Scripts\python.exe scripts\run_server.py `
+    --config config\acceptance\conf.acceptance.yaml
+```
+
+在浏览器打开客户端：
 - 客户端访问地址：<http://127.0.0.1:12393/>
 - 服务端 WebSocket 地址：`ws://127.0.0.1:12393/client-ws`
 
 ---
 
-## 六、自动化测试与验收
-
-项目配备完整的回归测试套件与集成测试：
+## 七、自动化测试与验收套件
 
 ```powershell
-# 运行单元与集成测试（默认排除真实外部 API 调用）
+# 1. 运行全量单元测试与集成测试（默认排除真实外部连通）
 .\vendor\Open-LLM-VTuber\.venv\Scripts\python.exe -m pytest
 
-# 运行真实外部连通性测试（需要真实凭据）
+# 2. 运行真实外部连通性测试（需要配置真实服务与模型环境变量）
 .\vendor\Open-LLM-VTuber\.venv\Scripts\python.exe -m pytest -m live_api
 
-# 运行主动交流节奏与故障恢复验收
+# 3. 运行隔离环境主动交流节奏测试（报告标注为 isolated_test_with_doubles，不代表现场验收）
 .\vendor\Open-LLM-VTuber\.venv\Scripts\python.exe scripts\check_proactive_flow.py
 
-# 运行记忆校准集扫描
-.\vendor\Open-LLM-VTuber\.venv\Scripts\python.exe scripts\calibrate_memory.py --dataset calibration
+# 4. 延迟采样审计与现场采录进度（口径见 docs/acceptance-guide.md D 节）
+.\vendor\Open-LLM-VTuber\.venv\Scripts\python.exe scripts\audit_latency_metrics.py
+.\vendor\Open-LLM-VTuber\.venv\Scripts\python.exe scripts\monitor_acceptance_progress.py
 ```
-
----
-
-## 七、目录结构说明
-
-- `aemeath/`：Aemeath 核心扩展模块（coordinator、situation、memory、screen、proactive、bridge 等）。
-- `config/`：配置定义与模板。
-- `docs/`：项目规范、需求（`requirements.md`）、架构（`architecture.md`）、验收记录（`acceptance.md`）及补丁清单（`patches/`）。
-- `scripts/`：环境检查、服务拉起、状态探针、测试驱动与校准工具。
-- `tests/`：pytest 自动化测试套件。
-- `vendor/`：第三方依赖底座（不入版本管理）。

@@ -135,6 +135,24 @@ class TestMetrics:
         assert "content" not in payload
         assert payload["turn_id"] == "t1"
 
+    def test_late_receipt_updates_persisted_file(self, tmp_path):
+        """Late arriving receipts must update an already finished turn on disk."""
+        path = tmp_path / "turns.jsonl"
+        recorder = MetricsRecorder(log_path=path)
+        recorder.start_turn("t1", "user_text")
+        recorder.finish_turn("t1")
+
+        payload = json.loads(path.read_text(encoding="utf-8").strip())
+        assert payload["client_playback_start_ms"] is None
+        assert payload["client_cancel_ms"] is None
+
+        recorder.mark_playback_started("t1", client_elapsed_ms=2500.0)
+        recorder.mark_cancel_complete("t1", client_elapsed_ms=120.0)
+
+        payload_after = json.loads(path.read_text(encoding="utf-8").strip())
+        assert payload_after["client_playback_start_ms"] == 2500.0
+        assert payload_after["client_cancel_ms"] == 120.0
+
     def test_bounded_history(self):
         recorder = MetricsRecorder(max_turns=3)
         for i in range(5):

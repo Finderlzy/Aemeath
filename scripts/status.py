@@ -80,6 +80,23 @@ def show_status(runtime) -> None:
     print(f"首段文字 P95  : {f'{p95_text:.0f} ms' if p95_text else '无数据'}")
     print(f"首段音频 P95  : {f'{p95_audio:.0f} ms' if p95_audio else '无数据'}")
 
+    client_metrics = metrics.get("client", {})
+    c_text = client_metrics.get("first_text_ms", {})
+    c_play = client_metrics.get("playback_start_ms", {})
+    c_cancel = client_metrics.get("cancel_ms", {})
+    if c_text.get("available") or c_play.get("available") or c_cancel.get("available"):
+        print("\n客户端端到端体验延迟")
+        print("-" * 56)
+        if c_text.get("available"):
+            suff = "达标" if c_text.get("sufficient") else "样本不足"
+            print(f"首段文字延迟  : P50={c_text.get('p50', 0):.0f} ms, P95={c_text.get('p95', 0):.0f} ms (样本: {c_text.get('count', 0)}, 目标: <=5000 ms, {suff})")
+        if c_play.get("available"):
+            suff = "达标" if c_play.get("sufficient") else "样本不足"
+            print(f"语音回复延迟  : P50={c_play.get('p50', 0):.0f} ms, P95={c_play.get('p95', 0):.0f} ms (样本: {c_play.get('count', 0)}, 目标: <=10000 ms, {suff})")
+        if c_cancel.get("available"):
+            suff = "达标" if c_cancel.get("sufficient") else "样本不足"
+            print(f"点击停止延迟  : P50={c_cancel.get('p50', 0):.0f} ms, P95={c_cancel.get('p95', 0):.0f} ms (样本: {c_cancel.get('count', 0)}, 目标: <=500 ms, {suff})")
+
     usage = metrics["usage"]
     print(f"累计轮次      : {usage['turns']}")
     print(f"输入 tokens   : {usage['input_tokens']}")

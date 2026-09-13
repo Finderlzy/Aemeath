@@ -357,6 +357,8 @@ class MetricsRecorder:
         if metric.client_first_text_ms is None:
             metric.client_first_text_ms = float(client_elapsed_ms)
             self.client_first_text.add(client_elapsed_ms)
+            if metric.finished:
+                self._update_persisted(metric)
 
     def mark_playback_started(self, turn_id: str, audio_slice_id: str = "",
                               client_elapsed_ms: Optional[float] = None) -> None:
@@ -367,6 +369,8 @@ class MetricsRecorder:
         if metric.client_playback_start_ms is None:
             metric.client_playback_start_ms = float(client_elapsed_ms)
             self.client_playback_start.add(client_elapsed_ms)
+            if metric.finished:
+                self._update_persisted(metric)
 
     def mark_cancel_complete(self, turn_id: str,
                              client_elapsed_ms: Optional[float] = None) -> None:
@@ -376,6 +380,8 @@ class MetricsRecorder:
             return
         metric.client_cancel_ms = float(client_elapsed_ms)
         self.client_cancel.add(client_elapsed_ms)
+        if metric.finished:
+            self._update_persisted(metric)
 
     def finish_turn(
         self,
@@ -425,6 +431,32 @@ class MetricsRecorder:
                 handle.write(json.dumps(record, ensure_ascii=False) + "\n")
         except Exception as exc:  # pragma: no cover - filesystem dependent
             logger.warning("Could not write metrics: {}", exc)
+
+    def _update_persisted(self, metric: TurnMetric) -> None:
+        """Update an already persisted record with late arriving client receipts."""
+        if self._path is None or not self._path.is_file():
+            return
+        try:
+            lines = self._path.read_text(encoding="utf-8").splitlines()
+            new_lines = []
+            target = f'"turn_id": "{metric.turn_id}"'
+            for line in lines:
+                if target in line:
+                    record = asdict(metric)
+                    try:
+                        old_rec = json.loads(line)
+                        if "logged_at" in old_rec:
+                            record["logged_at"] = old_rec["logged_at"]
+                    except Exception:
+                        pass
+                    if "logged_at" not in record:
+                        record["logged_at"] = datetime.now(timezone.utc).isoformat()
+                    new_lines.append(json.dumps(record, ensure_ascii=False))
+                else:
+                    new_lines.append(line)
+            self._path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+        except Exception as exc:  # pragma: no cover - filesystem dependent
+            logger.warning("Could not update persisted metrics: {}", exc)
 
     @staticmethod
     def _duration_summary(samples: SampleSet) -> Dict[str, Any]:

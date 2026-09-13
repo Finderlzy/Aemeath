@@ -123,6 +123,24 @@ character_config.agent_config.conversation_agent_choice
 3. `websocket_handler.py` 把 `ai-speak-signal` 改路由到 `_handle_ai_speak_signal`，
    只做资格检查；连接建立后尝试一次启动问候。非 Aemeath agent 走原路径。
 
+### 主动语音与轮次标识（T01）
+
+主动搭话本身没有上游对话循环，因此 **`TTSTaskManager` 不会被驱动**。
+补丁因此把合成引擎直接交给桥接：
+
+- `init_tts()` 与 `init_agent()` 都调用 `aemeath_bridge.attach_tts_engine(...)`，
+  两者都可能后执行，取最后生效的一方（桥接是进程级单例，引擎属于会话）。
+- 桥接用同一个引擎与 `prepare_audio_payload()` 合成主动音频，
+  与普通回复走同一套编码、同一套闸门。
+
+生成器导入修正为 `src.open_llm_vtuber.agent.input_types`（**A05**）。
+`open_llm_vtuber.*` 同样能导入成功——因为 `src/` 在 `sys.path` 上——
+但会把同一批文件执行第二遍，产生第二个 `BatchInput` 类，
+与项目"统一使用 `src.open_llm_vtuber.*`"的约定冲突。
+
+主动轮次 id 由桥接生成并**贯穿**文字、音频与显示回执：坐标相同的 id
+才能让客户端在打断后拒绝迟到音频，回执也才能对上同一条候选。
+
 ## 验证方式
 
 历史记录称补丁已验证可复现（原记载 2026-09-14，经 [T00 复核](https://github.com/Finderlzy/Aemeath/issues/1)

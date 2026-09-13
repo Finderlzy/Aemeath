@@ -453,6 +453,12 @@ def make_harness(tmp_path: Path):
         # the patched upstream code does.
         context.history_uid = bridge.history_uid
 
+        # A proactive message has no conversation loop to drive upstream's TTS,
+        # so the bridge holds the engine itself. Production does this in
+        # ``ServiceContext.init_tts``; the harness mirrors it because it builds
+        # the context by hand rather than through ``load_from_config``.
+        bridge.attach_tts_engine(context.tts_engine)
+
         return IntegrationHarness(
             runtime=runtime,
             agent=agent,

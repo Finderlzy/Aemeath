@@ -718,9 +718,6 @@ def build_runtime(
         max_per_hour=resolved.proactive.max_per_hour,
         startup_greeting_enabled=resolved.proactive.startup_greeting_enabled,
     )
-    coordinator = EventCoordinator(
-        situation=situation, scheduler=scheduler, hooks=hooks
-    )
     metrics = MetricsRecorder(log_path=resolved.log_dir / "turns.jsonl")
 
     screen = None
@@ -734,17 +731,31 @@ def build_runtime(
             summary_max_age_seconds=resolved.screen.summary_max_age_seconds,
         )
 
-    # The bridge is the only seam between upstream and Aemeath.
+    # The bridge is created first so the coordinator's output hooks can point at
+    # it: *whether* to speak stays the coordinator's decision, while delivering
+    # the text and voicing it with upstream's synthesis engine is the bridge's.
     from .bridge import AemeathBridge
 
     bridge = AemeathBridge(
-        coordinator=coordinator,
+        coordinator=None,
         situation=situation,
         memory=memory,
         screen=screen,
         metrics=metrics,
         config=resolved,
     )
+
+    async def _display_text(turn_id, text) -> None:
+        """Send display text through the bridge's tagged frame."""
+        await bridge.send_display_text(str(turn_id), text)
+
+    hooks = hooks or CoordinatorHooks(
+        on_display_text=_display_text, on_speak=bridge.on_speak
+    )
+    coordinator = EventCoordinator(
+        situation=situation, scheduler=scheduler, hooks=hooks
+    )
+    bridge.attach_coordinator(coordinator)
 
     runtime = AemeathRuntime(
         config=resolved,

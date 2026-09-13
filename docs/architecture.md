@@ -161,11 +161,11 @@ flowchart TD
 
 | 编号 | 证据与影响 | 建议、成本与验证 |
 | --- | --- | --- |
-| A01 / 优先修复 | `bridge.deliver_proactive()` 调用 `send_audio(turn_id, "", ...)`；上游 `_install_aemeath_proactive_generator()` 只收集显示文本，不执行 TTS。隔离调用得到 `audio_payloads=[""]`，不能形成可听主动语音 | 中等改动：主动输出复用普通回复的合成和发送流程，统一轮次标识；验证非空可解码音频、打断与课堂切换，随后真人听验 |
-| A02 / 优先修复 | `coordinator.run_proactive()` 在送达前 `mark_spoken()`；`bridge.on_display_receipt()` 再调用一次。隔离探针一次搭话回执前计数 1，回执后 2，会提前消耗频次且把未显示消息算作已发送 | 小到中等改动：回执作为唯一计数入口，处理重复／丢失回执；从 `bridge.run_proactive()` 起测，不能只测 `deliver_proactive()` |
+| A01 / 已修复（T01） | `bridge.deliver_proactive()` 调用 `send_audio(turn_id, "", ...)`；上游 `_install_aemeath_proactive_generator()` 只收集显示文本，不执行 TTS。隔离调用得到 `audio_payloads=[""]`，不能形成可听主动语音 | 中等改动：主动输出复用普通回复的合成和发送流程，统一轮次标识；验证非空可解码音频、打断与课堂切换，随后真人听验 |
+| A02 / 已修复（T01） | `coordinator.run_proactive()` 在送达前 `mark_spoken()`；`bridge.on_display_receipt()` 再调用一次。隔离探针一次搭话回执前计数 1，回执后 2，会提前消耗频次且把未显示消息算作已发送 | 小到中等改动：回执作为唯一计数入口，处理重复／丢失回执；从 `bridge.run_proactive()` 起测，不能只测 `deliver_proactive()` |
 | A03 / 优先修复 | `ScreenObserver.observe()` 在等待视觉响应后直接写 `_latest`；`reset()` 未改变可在返回时核对的代次。隔离探针在等待中 reset，再释放响应，`current_summary()` 仍非空。桥接拒绝外发不等于内部缓存未写回 | 小改动：观察器在 await 前后校验代次，关闭后缓存也保持空；增加关闭中返回、重新开启后旧请求返回的回归 |
 | A04 / 首期缺口 | 屏幕自动观察及摘要进入主动对话的连接缺失，证据见上节。手动请求成功不能满足 R05 | 中等改动：在统一调度下按需观察，生成时携带有效摘要与来源；发送前重检开关、窗口和用户活动。验证不点击按钮也能结合隔离窗口内容搭话，过期／关闭信息不进入模型 |
-| A05 / 随接入修复核对 | 主动生成器仍有 `from open_llm_vtuber.agent.input_types import ...`，与项目 `src.open_llm_vtuber.*` 约定不符。此处类型混用的具体运行影响未复现，不直接等同于此前回复丢弃故障 | 小改动：修复导入并核对补丁与工作副本一致；通过真实 `service_context` 生成器入口验证，不以替身生成器代替 |
+| A05 / 已修复（T01） | 主动生成器仍有 `from open_llm_vtuber.agent.input_types import ...`，与项目 `src.open_llm_vtuber.*` 约定不符。此处类型混用的具体运行影响未复现，不直接等同于此前回复丢弃故障 | 小改动：修复导入并核对补丁与工作副本一致；通过真实 `service_context` 生成器入口验证，不以替身生成器代替 |
 
 复现方法（均为内存替身，无 API、真实截图、数据库写入或音频播放）：
 
@@ -175,6 +175,30 @@ flowchart TD
 
 现有 `test_vision_result_discarded_after_observation_disabled` 应同时检查外发帧和观察器缓存；当前相关测试只断言返回值和外发帧，另一个 reset 测试在请求结束后关闭，未覆盖上述交错。
 生产入口测试应覆盖跨模块不变量，不能由多个局部通过推断整条链路成立。
+
+### A01 / A02 / A05 的修复（T01，2026-09-13）
+
+修复落在接入层，未改动 `aemeath/screen.py`，**T02 的屏幕缓存修复保持独立**。
+
+- **A01**：主动输出改走 `coordinator.emit_proactive()`，与普通回复共用输出闸门；
+  桥接通过 `attach_tts_engine()` 持有上游合成引擎，用同一个
+  `prepare_audio_payload()` 生成真实音频帧。上游补丁在 `init_tts()` 与
+  `init_agent()` 两处附加引擎，取最后生效的一方。
+- **A02**：`run_proactive()` 只返回候选、不再 `mark_spoken()`；
+  `on_display_receipt()` 成为唯一计数入口，重复与迟到回执都是空操作。
+  同时 `end_turn()` 现在会让轮次退休，使已结束轮次的迟到音频通不过
+  `may_send_audio()`；此前只有“活动轮次被顶替”才会进入取消集合。
+- **A05**：生成器导入改为 `src.open_llm_vtuber.agent.input_types`，
+  四个补丁对干净 `v1.2.1`（`3afa410`）重新验证：全部 `git apply --check` 通过，
+  套用后 8 个受影响文件与工作副本**逐字节一致**。
+
+回归测试在 `tests/integration/test_proactive_voice.py`，经真实上游生成器入口
+（`ServiceContext._install_aemeath_proactive_generator()`）驱动，
+只替换模型、TTS 引擎与音频接收端；计数从 `bridge.run_proactive()` 起测。
+覆盖课堂静音（含生成中切换）、取消、断线、用户插话、生成中关闭开关、
+重复／丢失回执、发送失败与静默标记。
+
+**仍未验证**：真人听感与真实设备播放（T05 承接）。
 
 ### 后续与暂不处理
 

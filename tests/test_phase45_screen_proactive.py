@@ -331,7 +331,9 @@ class TestCoordinator:
         self.events = []
         hooks = CoordinatorHooks(
             on_display_text=lambda tid, text: self._record("text", tid, text),
-            on_speak=lambda tid, text: self._record("speak", tid, text),
+            # The speak hook carries the event source as well, so the bridge can
+            # tell an ordinary reply from a self-initiated message.
+            on_speak=lambda tid, text, source=None: self._record("speak", tid, text),
             on_cancel_audio=lambda tid: self._record("cancel", tid, ""),
             on_cancel_all_audio=lambda: self._record("cancel_all", "", ""),
         )
@@ -449,7 +451,7 @@ class TestProactiveTurn:
             return "在看论文？"
 
         coord._hooks.on_display_text = lambda t, x: _noop()
-        coord._hooks.on_speak = lambda t, x: _record_speak(spoken, x)
+        coord._hooks.on_speak = lambda t, x, source=None: _record_speak(spoken, x)
         result = await coord.run_proactive(generate)
         assert result == "在看论文？"
 
@@ -486,7 +488,7 @@ class TestProactiveTurn:
         manager.set_mode(SpeechMode.CLASS)
         spoken = []
         coord._hooks.on_display_text = lambda t, x: _noop()
-        coord._hooks.on_speak = lambda t, x: _record_speak(spoken, x)
+        coord._hooks.on_speak = lambda t, x, source=None: _record_speak(spoken, x)
 
         async def generate():
             return "上课时的一条文字"

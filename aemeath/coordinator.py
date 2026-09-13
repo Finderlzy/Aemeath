@@ -45,7 +45,10 @@ class CoordinatorHooks:
     """
 
     on_display_text: Optional[Callable[[TurnId, str], Awaitable[None]]] = None
-    on_speak: Optional[Callable[[TurnId, str], Awaitable[None]]] = None
+    #: ``on_speak(turn_id, text, source)`` — synthesis callback. The source
+    #: tells the callee whether this is a user reply or a self-initiated
+    #: message, which are delivered and remembered differently.
+    on_speak: Optional[Callable[..., Awaitable[None]]] = None
     on_cancel_audio: Optional[Callable[[TurnId], Awaitable[None]]] = None
     on_cancel_all_audio: Optional[Callable[[], Awaitable[None]]] = None
     on_proactive_decided: Optional[
@@ -174,10 +177,54 @@ class EventCoordinator:
         self._active = state
         return state
 
+    def adopt_turn(self, source: EventSource, turn_id: TurnId) -> TurnState:
+        """Open a turn under a caller-supplied id.
+
+        Used when the id has to exist before the coordinator is entered — the
+        bridge mints the proactive turn id up front so the same id can tag the
+        output frames and be matched against the client's display receipt.
+        Adoption still supersedes whatever was running, so the one-turn-at-a-
+        time rule and the cancellation bookkeeping are unchanged.
+
+        Args:
+            source: Where this turn came from.
+            turn_id: The id the caller already minted.
+
+        Returns:
+            The new turn state.
+        """
+        if self._active is not None and self._active.turn_id != turn_id:
+            self._active.cancelled = True
+            self._cancelled.add(str(self._active.turn_id))
+            logger.info("Turn {} superseded by a new turn.", self._active.turn_id)
+            self._schedule(self._cancel_audio(self._active.turn_id))
+
+        # Re-opening the same id must not inherit its own retirement.
+        self._cancelled.discard(str(turn_id))
+        state = TurnState(turn_id=turn_id, source=source)
+        state.speech_allowed = self._situation.should_speak()
+        self._active = state
+        return state
+
     def end_turn(self, turn_id: TurnId) -> None:
-        """Mark a turn finished."""
+        """Mark a turn finished and retire it from further output.
+
+        Retiring matters as much as clearing the active slot. A turn that has
+        already been delivered must not be able to emit a second, late slice:
+        once the user starts typing, that queued audio is stale by definition,
+        and ``may_send_audio`` has to say so. Leaking audio out of a finished
+        turn is how a proactive message could be heard *after* the user had
+        already replied to something else.
+
+        No cancellation is scheduled here: this method is synchronous and is
+        also called from contexts with no running loop. Retiring the turn id is
+        what makes late output fail the ``may_send_audio`` check, and the
+        caller that knows about a live queue (a mode switch, an interrupt)
+        clears it explicitly.
+        """
         if self._active is not None and self._active.turn_id == turn_id:
             self._active = None
+        self._cancelled.add(str(turn_id))
 
     def is_cancelled(self, turn_id: TurnId) -> bool:
         """Whether a turn has been superseded or interrupted."""
@@ -240,7 +287,43 @@ class EventCoordinator:
             logger.debug("Speech suppressed for turn {} by situation.", turn_id)
             return False
         if self._hooks.on_speak is not None:
-            await self._hooks.on_speak(turn_id, text)
+            await self._hooks.on_speak(turn_id, text, EventSource.USER_TEXT)
+        return True
+    async def emit_proactive(
+        self, turn_id: TurnId, text: str, *, source: EventSource = EventSource.PROACTIVE
+    ) -> bool:
+        """Deliver one generated message's text and, when allowed, its audio.
+
+        Text always goes out — classroom mode mutes audio, never display — and
+        speech additionally requires that the turn is still current and the
+        situation still permits voice. Both conditions are re-checked here,
+        immediately before synthesis, because a mode switch, an interrupt or a
+        user turn can land while the model is still generating.
+
+        This is shared by ordinary replies and proactive candidates on purpose:
+        A01 existed because the proactive path had its own, audio-less send.
+
+        Args:
+            turn_id: Turn this output belongs to.
+            text: The message to display and, when allowed, to speak.
+            source: Origin of the turn, recorded in the hook.
+
+        Returns:
+            ``True`` when the turn was current and the text was sent, ``False``
+            when the turn had already been cancelled or superseded.
+        """
+        if self.is_cancelled(turn_id):
+            logger.debug("Dropping output for cancelled turn {}.", turn_id)
+            return False
+        if self._active is not None and self._active.turn_id == turn_id:
+            self._active.text += text
+        if self._hooks.on_display_text is not None:
+            await self._hooks.on_display_text(turn_id, text)
+        if not self._situation.should_speak():
+            logger.debug("Speech suppressed for turn {} by situation.", turn_id)
+            return True
+        if self._hooks.on_speak is not None:
+            await self._hooks.on_speak(turn_id, text, source)
         return True
 
     async def _cancel_audio(self, turn_id: TurnId) -> None:
@@ -331,6 +414,7 @@ class EventCoordinator:
         *,
         is_startup: bool = False,
         now: Optional[float] = None,
+        turn_id: Optional[TurnId] = None,
     ) -> Optional[str]:
         """Attempt a proactive turn.
 
@@ -338,13 +422,23 @@ class EventCoordinator:
         generation, and a candidate produced for a superseded situation is
         discarded instead of sent.
 
+        Sending is deliberately *not* done here. The message is only counted as
+        delivered when the client confirms it was displayed, and that receipt
+        is handled by the bridge, so the coordinator returns the candidate and
+        lets the bridge own delivery. Counting here as well is precisely the
+        double count A02 described.
+
         Args:
             generate: Callable producing the candidate message.
             is_startup: Whether this is the startup greeting.
             now: Optional timestamp override.
+            turn_id: Turn to use, when the caller already minted one. The
+                bridge does, because the id has to be on the frames before the
+                candidate is produced and must stay the same one its receipt
+                arrives on. When omitted a fresh turn is created.
 
         Returns:
-            The message that was sent, or ``None`` when nothing was said.
+            The candidate that was sent, or ``None`` when nothing was said.
         """
         decision = await self.consider_proactive(is_startup=is_startup, now=now)
         if not decision.eligible:
@@ -353,7 +447,11 @@ class EventCoordinator:
                 await self._hooks.on_proactive_decided(decision, "")
             return None
 
-        turn = self.begin_turn(EventSource.PROACTIVE)
+        turn = (
+            self.begin_turn(EventSource.PROACTIVE)
+            if turn_id is None
+            else self.adopt_turn(EventSource.PROACTIVE, turn_id)
+        )
         try:
             candidate = (await generate()).strip()
         except Exception as exc:
@@ -361,13 +459,23 @@ class EventCoordinator:
             self.end_turn(turn.turn_id)
             return None
 
-        # Re-check before sending: the user may have started typing.
+        # Re-check before sending: the user may have started typing, and the
+        # switch may have been turned off while the model was generating. The
+        # situation is re-read rather than trusted from the earlier decision,
+        # because that decision was made before an arbitrary-length await.
         if self.is_cancelled(turn.turn_id):
             logger.info("Proactive candidate discarded: turn superseded.")
+            self.end_turn(turn.turn_id)
             return None
         if self.user_typing or self.mic_active:
             logger.info("Proactive candidate discarded: user became active.")
             self.end_turn(turn.turn_id)
+            return None
+        if not self.situation.proactive_enabled:
+            logger.info("Proactive candidate discarded: reactive switch turned off.")
+            self.end_turn(turn.turn_id)
+            if self._hooks.on_proactive_decided is not None:
+                await self._hooks.on_proactive_decided(decision, "")
             return None
         if not candidate or "[SILENCE]" in candidate:
             logger.debug("Proactive declined by model.")
@@ -376,18 +484,23 @@ class EventCoordinator:
                 await self._hooks.on_proactive_decided(decision, "")
             return None
 
-        self._scheduler.mark_spoken(now)
-        if is_startup:
-            self._scheduler.mark_greeted()
-
-        await self.emit_text(turn.turn_id, candidate)
-        if self._situation.should_speak():
-            await self.emit_speech(turn.turn_id, candidate)
-
-        self.end_turn(turn.turn_id)
+        # The candidate is *returned*, not sent or counted: the bridge delivers
+        # it and only the client's display receipt records it as spoken. The
+        # turn therefore stays open and current so the bridge can still emit its
+        # text and audio; the bridge closes it once delivery is done.
         if self._hooks.on_proactive_decided is not None:
             await self._hooks.on_proactive_decided(decision, candidate)
         return candidate
+
+    def mark_proactive_greeted(self, *, is_startup: bool) -> None:
+        """Record that a startup greeting has been used.
+
+        Separate from :meth:`mark_spoken` because the greeting is one-shot per
+        session whether or not the client ever confirmed showing it: repeating
+        it on every reconnect would be worse than a missed receipt.
+        """
+        if is_startup:
+            self._scheduler.mark_greeted()
 
     def notify_user_activity(self) -> None:
         """Record that the user did something, clearing the unanswered state."""

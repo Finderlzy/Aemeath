@@ -174,7 +174,7 @@ flowchart TD
 | A01 / 已修复（T01） | `bridge.deliver_proactive()` 调用 `send_audio(turn_id, "", ...)`；上游 `_install_aemeath_proactive_generator()` 只收集显示文本，不执行 TTS。隔离调用得到 `audio_payloads=[""]`，不能形成可听主动语音 | 中等改动：主动输出复用普通回复的合成和发送流程，统一轮次标识；验证非空可解码音频、打断与课堂切换，随后真人听验 |
 | A02 / 已修复（T01） | `coordinator.run_proactive()` 在送达前 `mark_spoken()`；`bridge.on_display_receipt()` 再调用一次。隔离探针一次搭话回执前计数 1，回执后 2，会提前消耗频次且把未显示消息算作已发送 | 小到中等改动：回执作为唯一计数入口，处理重复／丢失回执；从 `bridge.run_proactive()` 起测，不能只测 `deliver_proactive()` |
 | A03 / 已修复（T02） | `ScreenObserver.observe()` 在等待视觉响应后直接写 `_latest`；`reset()` 未改变可在返回时核对的代次。隔离探针在等待中 reset，再释放响应，`current_summary()` 仍非空。桥接拒绝外发不等于内部缓存未写回 | 小改动：观察器在 await 前后校验代次，关闭后缓存也保持空；增加关闭中返回、重新开启后旧请求返回的回归 |
-| A04 / 首期缺口 | 屏幕自动观察及摘要进入主动对话的连接缺失，证据见上节。手动请求成功不能满足 R05 | 中等改动：在统一调度下按需观察，生成时携带有效摘要与来源；发送前重检开关、窗口和用户活动。验证不点击按钮也能结合隔离窗口内容搭话，过期／关闭信息不进入模型 |
+| A04 / 已修复（T03） | 屏幕自动观察及摘要进入主动对话的连接缺失，证据见上节。手动请求成功不能满足 R05 | 中等改动：在统一调度下按需观察，生成时携带有效摘要与来源；发送前重检开关、窗口和用户活动。验证不点击按钮也能结合隔离窗口内容搭话，过期／关闭信息不进入模型 |
 | A05 / 已修复（T01） | 主动生成器仍有 `from open_llm_vtuber.agent.input_types import ...`，与项目 `src.open_llm_vtuber.*` 约定不符。此处类型混用的具体运行影响未复现，不直接等同于此前回复丢弃故障 | 小改动：修复导入并核对补丁与工作副本一致；通过真实 `service_context` 生成器入口验证，不以替身生成器代替 |
 
 复现方法（均为内存替身，无 API、真实截图、数据库写入或音频播放）：
@@ -253,6 +253,99 @@ flowchart TD
 同时断言外发帧与观察器缓存。
 
 **仍未验证**：锁屏与「窗口不可用」分支的人工触发观察（T06 承接）。
+
+### A04 的修复（T03，2026-09-13，接在 T01/T02 之后）
+
+按 Issue #4 的串行集成约束，T03 在 T01、T02 合并进 `main` 之后从最新 `main` 开始。
+修复过程中先发现了一个**比 A04 本身更硬的问题**。
+
+#### 1. 主动定时器此前根本不会运行（修复过程中发现）
+
+`AemeathRuntime._proactive_worker()` 的第一轮循环读 `self.config.proactive.enabled`，
+而 `ProactiveConfig` **没有 `enabled` 字段**（只有 `cooldown_seconds`、`max_per_hour`、
+`startup_greeting_enabled`、`check_interval_seconds`）。属性访问直接抛 `AttributeError`，
+被 worker 的 `except Exception` 吞成一条 ERROR 日志。
+
+后果是：**上游定时器从来没有真正跑过**，主动搭话只能由客户端信号触发——
+也就是"后端调度器是主动轮次的唯一来源"这条设计约定在真实运行中没有成立。
+T01 的回归全部经 `bridge.run_proactive()` 直接驱动，因此没有信号能暴露它。
+
+修复：worker 不再读配置里的"启用"开关。是否允许说话由**持久化的情境开关**
+决定，由桥接与调度器**按次**检查；配置里本就没有这个字段。
+
+#### 2. 屏幕观察与主动对话的连接（A04 本体）
+
+原来的链路里没有任何一环看过屏幕：
+
+- `_proactive_worker` 只调用 `bridge.run_proactive()`；
+- `bridge.run_proactive()` 只问调度器、然后调生成器；
+- `service_context._generate()` 只放主动提示文本；
+- `AemeathAgent._build_messages()` 不读 `current_summary()`。
+
+现在补齐为：**先问资格 → 按需观察 → 生成 → 发送前重检**。
+
+顺序是设计的一部分，不是实现细节：
+
+1. **先问资格**：定时器每次都会问，而"不合格"是常态。把观察放在资格检查之后，
+   被拒绝的那次尝试不抓屏、不调用视觉模型。
+2. **再按需观察**：`bridge.observe_for_proactive()` 只在观察开关打开时抓取，
+   并沿用观察器自己的节流与稳定性闸门——画面没变就不会重复调用视觉模型。
+   截图失败、窗口不可用、锁屏都只是"本轮没有屏幕上下文"，不会伪造摘要。
+3. **生成**：`AemeathAgent._build_messages()` 在组装提示词的**同一时刻**调用
+   桥接提供的 provider 取有效摘要，摘要与**来源窗口标题**一起进入 user 提示。
+4. **发送前重检**：`coordinator.run_proactive()` 原有的重检（轮次、用户活动、
+   主动开关）保持不变；用户输入或已有回复时整条候选被丢弃。
+
+#### 3. 摘要有效性是硬约束
+
+`bridge.current_screen_summary()` 是唯一入口，四条件全部满足才返回摘要，
+否则返回 `None`（**不是**旧摘要）：
+
+- 配置了观察器；
+- 观察开关打开——**情境状态与观察器自身开关必须一致**；
+- 摘要在 `summary_max_age_seconds` 内；
+- 摘要带有非空的**来源窗口标题**，否则无法归因，不得作为"你正在做什么"。
+
+provider 是**可调用对象**而不是快照：用户可以在模型生成的任意长等待期间关掉观察，
+有效性必须在组装提示词那一刻重新判定。T02 的代次校验继续负责让迟到的视觉响应
+自行丢弃，两者的职责不重叠。
+
+#### 4. 回归与变异验证
+
+回归在 `tests/integration/test_proactive_screen_driven.py`（17 项），
+经**真实链路**驱动：`runtime._proactive_worker` 定时器 → `bridge.run_proactive`
+→ 上游 `ServiceContext._install_aemeath_proactive_generator()` →
+`AemeathAgent._build_messages()` → 模型请求。只替换模型、TTS 引擎与捕获／视觉端，
+**没有任何一例调用 `run_proactive` 之外的捷径，也没有发送客户端搭话或观察信号**。
+`FakeScreenCapture` 的像素按窗口标题派生，因此切换窗口不会因"画面没变"而掩盖串画面。
+
+三处守卫经变异验证（改坏实现即失败）：
+
+| 变异 | 结果 |
+| --- | --- |
+| 去掉 provider 的观察开关检查 | `test_summary_provider_refuses_a_cached_summary_when_off` 失败 |
+| 去掉来源窗口标题要求 | `test_summary_without_a_source_window_is_refused` 失败 |
+| 去掉 `run_proactive` 里的按需观察 | 5 项失败（引用内容、来源窗口、切窗、节流、迟到丢弃） |
+
+后两项是**先写变异、发现测试没抓住、再补测试**才成立的：最初去掉开关检查时
+17 项全绿，因为 `set_switch("screen", False)` 同时清空了观察器缓存，
+测试无法区分是哪一层在起作用。补测因此只翻转情境状态、保留缓存，
+让 provider 自己的守卫成为唯一可能的原因。
+
+#### 5. 集成测试脚手架的两处修正（测试基建，非产品行为）
+
+两处都会让集成测试**测的不是生产接线**，因此一并修正：
+
+- `harness` 现在把自建的 runtime 注册为进程单例。`AgentFactory` 会调用
+  `get_runtime()`；单例未设置时它会**再建一个 runtime**，其视觉与捕获能力为空，
+  于是 agent 接的是另一个桥接，测试驱动的却是本地的那个。
+  生产中"每进程恰好一个 runtime"是构造保证的，harness 必须复现。
+- `make_harness` 会取消耗时未执行的 `runtime.start()` 任务。上游工厂用
+  `create_task` 安排启动，该任务会在稍后的 `await` 里落地——通常正好落在
+  某个测试自己的 `stop()` 之后，把它刚释放的 worker 重新建出来。
+
+**仍未验证**：真实屏幕下自动观察的观感、锁屏与窗口不可用的自动分支（T06 承接）；
+T03 的全部证据均为隔离窗口与替身，不代表真机体验。
 
 ## TTS 正式方案：本地 GPT-SoVITS（2026-09-13 用户确认）
 

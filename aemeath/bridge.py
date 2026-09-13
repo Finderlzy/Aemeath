@@ -43,7 +43,13 @@ from loguru import logger
 
 from src.open_llm_vtuber.utils.stream_audio import prepare_audio_payload
 
-from .interfaces import EventSource, SituationState, SpeechMode, TurnId
+from .interfaces import (
+    EventSource,
+    ScreenObservation,
+    SituationState,
+    SpeechMode,
+    TurnId,
+)
 
 #: Protocol version this bridge speaks. A client that does not negotiate at
 #: least this version is not treated as a full Aemeath client.
@@ -627,6 +633,13 @@ class AemeathBridge:
         ``ai-speak-signal`` and the runtime's timer call it, so the eligibility
         rules are applied identically no matter what triggered the attempt.
 
+        Observation happens **after** the eligibility check and **before**
+        generation. That order matters: looking at the screen is the expensive
+        step, so it must not run for an attempt the scheduler was going to deny
+        anyway (which is the common case on a fixed tick); and it must run
+        before generation, because the model needs the summary to have anything
+        concrete to say.
+
         Returns:
             The message that was delivered, or ``None`` when nothing was said.
         """
@@ -634,6 +647,15 @@ class AemeathBridge:
         if generate is None:
             logger.debug("Proactive skipped: no generator installed yet.")
             return None
+
+        # Ask first, look second: an ineligible attempt costs no capture and no
+        # vision call. The coordinator re-checks everything again below.
+        decision = await self._coordinator.consider_proactive(is_startup=is_startup)
+        if not decision.eligible:
+            logger.debug("Proactive declined: {}", decision.reason)
+            return None
+
+        await self.observe_for_proactive()
 
         turn_id = str(TurnId.new())
 
@@ -889,6 +911,94 @@ class AemeathBridge:
                 "observation_generation": generation,
             }
         )
+        return observation
+
+    # ------------------------------------------------------------------
+    # Screen observation for proactive conversation (A04 / T03)
+    # ------------------------------------------------------------------
+
+    def screen_available(self) -> bool:
+        """Whether a screen observer is wired in at all."""
+        return self._screen is not None
+
+    def observe_enabled(self) -> bool:
+        """Whether automatic screen observation is currently switched on.
+
+        Read from the *situation state* rather than the observer, because the
+        switch is the user-facing decision and the observer only mirrors it.
+        Both are consulted so a half-applied switch cannot be observed as on.
+        """
+        if self._screen is None:
+            return False
+        if not self._situation.state.screen_observation_enabled:
+            return False
+        return bool(getattr(self._screen, "enabled", False))
+
+    async def observe_for_proactive(self) -> None:
+        """Observe on demand before a proactive attempt, when allowed.
+
+        This is the missing connection A04 described: the runtime's timer used
+        to ask the bridge for a proactive message without anything ever looking
+        at the screen, so "screen understanding works" and "she can open a topic
+        about the screen" were unrelated facts.
+
+        The observation is *best effort*. A missing observer, an off switch, a
+        locked session, an unstable window or a failed capture all leave the
+        previous state alone and simply mean the model is asked without a screen
+        summary — they are never an error and never produce a fabricated one.
+        Ordinary throttling still applies: an unchanged picture is not
+        re-analysed, so repeated ticks do not repeatedly call the vision model.
+        """
+        if not self.observe_enabled():
+            logger.debug("Proactive observation skipped: observation is off.")
+            return
+
+        generation = self._observation_generation
+        try:
+            observation = await self._screen.observe()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("Proactive observation failed: {}", exc)
+            return
+
+        if generation != self._observation_generation:
+            logger.info("Discarding proactive observation from stale generation.")
+            return
+        if observation is not None:
+            logger.info(
+                "Proactive observation recorded for window '{}'.",
+                observation.window_title,
+            )
+
+    def current_screen_summary(self) -> Optional[ScreenObservation]:
+        """The screen summary that may enter a conversation right now.
+
+        Returns ``None`` — never a stale or unprovenanced summary — unless
+        every one of these holds at the moment of the call:
+
+        * a screen observer is configured;
+        * observation is switched on (both the situation switch and the
+          observer's own guard agree);
+        * a summary exists and it has not exceeded
+          ``summary_max_age_seconds``;
+        * the summary carries a non-empty source window title, so provenance is
+          available to the prompt rather than implied.
+
+        The summary is re-read here rather than captured once at generation
+        time, because the user can switch observation off during the
+        arbitrary-length model call that follows.
+        """
+        if self._screen is None:
+            return None
+        if not self.observe_enabled():
+            return None
+
+        observation = self._screen.current_summary()
+        if observation is None:
+            return None
+        if not (observation.summary or "").strip():
+            return None
+        if not (observation.window_title or "").strip():
+            return None
         return observation
 
     # ------------------------------------------------------------------

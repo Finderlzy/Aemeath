@@ -604,6 +604,13 @@ class AemeathRuntime:
         the bridge to attempt one, and the bridge applies the eligibility rules
         before anything is generated. A denied attempt is the common case and
         costs nothing, so a fixed tick is sufficient.
+
+        Whether Aemeath may speak is deliberately **not** read from the config
+        here. There is no ``proactive.enabled`` setting: permission comes from
+        the persisted situation switch, which the bridge and the scheduler
+        consult per attempt. Reading a non-existent config field here used to
+        raise ``AttributeError`` on the first tick, so the timer never ran at
+        all and the backend could never start a topic on its own.
         """
         interval = self.config.proactive.check_interval_seconds
         while True:
@@ -613,11 +620,12 @@ class AemeathRuntime:
                 raise
 
             bridge = self.bridge
-            if bridge is None or not self.config.proactive.enabled:
+            if bridge is None:
                 continue
 
             try:
-                # The bridge re-checks every rule; the timer only asks.
+                # The bridge re-checks every rule and observes on demand; the
+                # timer only asks.
                 await bridge.run_proactive()
             except asyncio.CancelledError:
                 raise

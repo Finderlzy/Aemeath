@@ -1,8 +1,8 @@
 diff --git a/src/open_llm_vtuber/agent/agent_factory.py b/src/open_llm_vtuber/agent/agent_factory.py
-index 4892a23..dea5b18 100644
+index 4892a23..ec3ba13 100644
 --- a/src/open_llm_vtuber/agent/agent_factory.py
 +++ b/src/open_llm_vtuber/agent/agent_factory.py
-@@ -128,5 +128,78 @@ class AgentFactory:
+@@ -128,5 +128,85 @@ class AgentFactory:
                  port=settings.get("port"),
              )
  
@@ -77,6 +77,13 @@ index 4892a23..dea5b18 100644
 +                situation=runtime.situation,
 +                memory=runtime.memory,
 +                config=aemeath_config,
++                # The bridge is the authority on whether a screen summary may
++                # enter a prompt: it is the only object that knows the switch,
++                # the source window and the summary's age. Passing the callable
++                # (rather than a summary) is what lets the agent re-check all
++                # three at prompt-assembly time, after the user may have
++                # switched observation off during generation.
++                screen_summary_provider=runtime.bridge.current_screen_summary,
 +            )
 +
          else:

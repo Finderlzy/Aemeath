@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import Iterable, Optional
 
-from .interfaces import EventSource, MemoryRecord, SituationState
+from .interfaces import EventSource, MemoryRecord, SituationState, ScreenObservation
 
 # Explicitly stated so a failure to retrieve is not silently filled in.
 _MEMORY_UNAVAILABLE_RULE = (
@@ -45,10 +45,43 @@ _SCREEN_RULE_ABSENT = (
     "本轮没有屏幕内容。不要声称你看到了用户的屏幕。"
 )
 
+_SCREEN_RULE_SUMMARY = (
+    "下面「刚观察到的屏幕」是视觉模型对用户前台窗口{age}的真实描述，"
+    "来源窗口是「{title}」。你可以自然地提到它，但不要逐字复述，"
+    "也不要假装看到了描述之外的内容；没有把握时说不确定。"
+)
+
 _MODE_RULE_CLASS = (
     "当前是课堂模式：你的回复只以文字显示，不会被朗读。"
     "保持简短，不要打断用户听课。"
 )
+
+
+def _age_phrase(observation: ScreenObservation, now: Optional[float] = None) -> str:
+    """Human-readable age of an observation, for prompt wording.
+
+    The age is stated explicitly so the model can weigh how current the picture
+    is instead of treating every summary as live by default.
+    """
+    age = observation.age_seconds(now)
+    if age < 5:
+        return "（刚刚截取）"
+    if age < 60:
+        return f"（约 {int(age)} 秒前截取）"
+    return f"（约 {int(age // 60)} 分钟前截取）"
+
+
+def _format_screen(observation: ScreenObservation,
+                   now: Optional[float] = None) -> str:
+    """Render a screen observation with its provenance and age.
+
+    The window title is always included: an observation the model cannot
+    attribute to a window must not be presented as "what you are doing".
+    """
+    rule = _SCREEN_RULE_SUMMARY.format(
+        age=_age_phrase(observation, now), title=observation.window_title
+    )
+    return f"刚观察到的屏幕（来源窗口：{observation.window_title}）：\n{observation.summary}\n{rule}"
 
 
 def _format_memories(memories: Iterable[MemoryRecord]) -> str:
@@ -108,12 +141,19 @@ def build_user_prompt(
     situation: Optional[SituationState] = None,
     has_screen_image: bool = False,
     memory_available: bool = True,
+    screen_summary: Optional[ScreenObservation] = None,
 ) -> str:
     """Build the user-facing content for a turn.
 
     Placeholder text is included in the *user* role only as content the model
     should respond to; the conversation handler separately decides what is
     recorded as history.
+
+    Args:
+        screen_summary: A screen observation that is currently usable, or
+            ``None``. The caller is responsible for having applied the switch,
+            age and provenance rules; this function only renders what it is
+            given and never invents a summary of its own.
     """
     parts = []
 
@@ -129,6 +169,17 @@ def build_user_prompt(
 
     if has_screen_image:
         parts.append(_SCREEN_RULE_PRESENT)
+    elif screen_summary is not None and event is EventSource.PROACTIVE:
+        # A summary without the image attached, and only on the *proactive*
+        # path: there the model has no user message and nothing was sent to the
+        # client, so the description is the only thing it can speak about.
+        #
+        # An ordinary user turn keeps its existing behaviour. A user turn that
+        # arrived with an image already has the image itself, and one that did
+        # not must not silently acquire a screen summary it was never given —
+        # widening that would change how every reply is prompted, which is not
+        # what the screen-driven proactive task covers.
+        parts.append(_format_screen(screen_summary))
     elif event is not EventSource.PROACTIVE:
         parts.append(_SCREEN_RULE_ABSENT)
 

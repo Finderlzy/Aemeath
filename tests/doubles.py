@@ -170,11 +170,19 @@ class FakeScreenCapture:
         return self.window
 
     def grab(self, window) -> bytes:
-        """Return a fake image payload for the given window."""
+        """Return a fake image payload for the given window.
+
+        The bytes are derived from the window title so that two different
+        windows produce two different pictures. A constant payload would make
+        the observer's "the screen has not changed" dedup fire on every window
+        switch, which would silently mask a summary carried over from the
+        previous window.
+        """
         self.capture_count += 1
         if self.fail:
             raise RuntimeError("capture failed")
-        return b"\x89PNG\r\n\x1a\nfake-image-bytes"
+        title = getattr(window, "title", "") or ""
+        return b"\x89PNG\r\n\x1a\nfake-image-bytes:" + title.encode("utf-8")
 
 
 class FakeVision:

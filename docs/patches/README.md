@@ -164,6 +164,28 @@ screen_summary_provider=runtime.bridge.current_screen_summary,
 - 按序 `git apply --check` 四个补丁对干净 `v1.2.1`（commit `3afa410`）全部成功；
 - 套用后文件与工作副本**逐字节一致**。
 
+## 客户端改动与补丁（T07 纳入交付）
+
+客户端源码位于 `vendor/Open-LLM-VTuber-Web`，固定基线为 commit `d176e7df2366952e3bacbf12cf9a8b18a4315932`。
+所有客户端改动（含 8 个修改文件与 2 个 Aemeath 专属协议/上下文文件）均纳入独立补丁：
+
+| 补丁文件 | 目标仓库 | 作用 |
+| --- | --- | --- |
+| `docs/patches/web/0001-aemeath-web-client.patch` | `vendor/Open-LLM-VTuber-Web` | 协议协商（v2）、显示与播放端到端回执上报、迟到音频拒绝与静音保护、Aemeath 上下文与打断联动 |
+
+套用命令：
+```powershell
+cd vendor/Open-LLM-VTuber-Web
+git apply ..\..\docs\patches\web\0001-aemeath-web-client.patch
+```
+
+套用后执行编译并部署到后端：
+```powershell
+npm.cmd run build:web
+Copy-Item dist\web\assets\* ..\Open-LLM-VTuber\frontend\assets\ -Force
+Copy-Item dist\web\index.html ..\Open-LLM-VTuber\frontend\index.html -Force
+```
+
 > 重新生成补丁时必须保留 LF 行尾。用 PowerShell 的 `Out-File`/`>` 会写出
 > CRLF 或 UTF-16LE，导致 `git apply` 报 patch does not apply 或
 > "No valid patches in input"。可靠做法是

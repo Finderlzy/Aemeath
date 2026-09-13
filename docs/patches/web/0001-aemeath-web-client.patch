@@ -1,0 +1,981 @@
+diff --git a/src/renderer/src/App.tsx b/src/renderer/src/App.tsx
+index 9fb874e..6bb1222 100644
+--- a/src/renderer/src/App.tsx
++++ b/src/renderer/src/App.tsx
+@@ -29,6 +29,7 @@ import Background from "./components/canvas/background";
+ import WebSocketStatus from "./components/canvas/ws-status";
+ import Subtitle from "./components/canvas/subtitle";
+ import { ModeProvider, useMode } from "./context/mode-context";
++import { AemeathProvider } from "./context/aemeath-context";
+ 
+ function AppContent(): JSX.Element {
+   const [showSidebar, setShowSidebar] = useState(true);
+@@ -183,8 +184,13 @@ function AppWithGlobalStyles(): JSX.Element {
+                           <GroupProvider>
+                             <BrowserProvider>
+                               <WebSocketHandler>
+-                                <Toaster />
+-                                <AppContent />
++                                {/* Aemeath controls sit inside the WebSocket
++                                    handler so every action is routed through
++                                    the bridge. */}
++                                <AemeathProvider>
++                                  <Toaster />
++                                  <AppContent />
++                                </AemeathProvider>
+                               </WebSocketHandler>
+                             </BrowserProvider>
+                           </GroupProvider>
+diff --git a/src/renderer/src/context/aemeath-context.tsx b/src/renderer/src/context/aemeath-context.tsx
+new file mode 100644
+index 0000000..a16369f
+--- /dev/null
++++ b/src/renderer/src/context/aemeath-context.tsx
+@@ -0,0 +1,206 @@
++/* eslint-disable react/jsx-no-constructed-context-values */
++/**
++ * Aemeath controls: mode, switches, screen request and typing activity.
++ *
++ * These are the client half of the bridge contract. Every action here sends a
++ * message the backend routes through the bridge, so no client control can
++ * bypass the coordinator.
++ */
++import React, {
++  createContext,
++  useCallback,
++  useContext,
++  useEffect,
++  useMemo,
++  useRef,
++  useState,
++} from 'react';
++import { useWebSocket } from '@/context/websocket-context';
++import {
++  AEMEATH_PROTOCOL_VERSION,
++  AemeathState,
++  aemeathProtocol,
++} from '@/services/aemeath-protocol';
++
++interface AemeathContextProps {
++  /** Whether the backend accepted this client as a full Aemeath client. */
++  negotiated: boolean;
++  /** Latest situation state reported by the backend. */
++  state: AemeathState | null;
++  /** Whether the client is showing text for a turn. */
++  setMode: (mode: 'normal' | 'class') => void;
++  setSwitch: (name: 'microphone' | 'screen' | 'proactive', enabled: boolean) => void;
++  requestScreen: () => void;
++  /** Report whether the user is typing, used by the proactive rules. */
++  reportTyping: (typing: boolean) => void;
++  /** Report whether the microphone is capturing. */
++  reportVoiceActivity: (active: boolean) => void;
++  requestMemories: () => void;
++  forgetMemory: (memoryId: string, fragments?: string[]) => void;
++}
++
++const noop = () => {};
++
++export const AemeathContext = createContext<AemeathContextProps>({
++  negotiated: false,
++  state: null,
++  setMode: noop,
++  setSwitch: noop,
++  requestScreen: noop,
++  reportTyping: noop,
++  reportVoiceActivity: noop,
++  requestMemories: noop,
++  forgetMemory: noop,
++});
++
++export function useAemeath() {
++  return useContext(AemeathContext);
++}
++
++/** How long typing must stop before activity is reported as ended. */
++const TYPING_IDLE_MS = 1200;
++
++export function AemeathProvider({ children }: { children: React.ReactNode }) {
++  const { sendMessage, wsState } = useWebSocket();
++  const [state, setState] = useState<AemeathState | null>(null);
++  const [negotiated, setNegotiated] = useState(false);
++  const typingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
++  const typingReported = useRef(false);
++
++  // Mirror protocol state into React state for rendering. The protocol object
++  // itself stays the source of truth for the audio path, which reads it
++  // synchronously.
++  useEffect(() => {
++    const interval = setInterval(() => {
++      setNegotiated(aemeathProtocol.negotiated);
++    }, 500);
++    return () => clearInterval(interval);
++  }, []);
++
++  // Ask the backend for the current state whenever the connection opens, so a
++  // reconnect does not leave the UI showing a stale mode.
++  useEffect(() => {
++    if (wsState === 'OPEN') {
++      sendMessage({
++        type: 'aemeath-hello',
++        protocol_version: AEMEATH_PROTOCOL_VERSION,
++      });
++    }
++  }, [wsState, sendMessage]);
++
++  const setMode = useCallback(
++    (mode: 'normal' | 'class') => {
++      // Optimistically mark every turn cancelled: the backend confirms with a
++      // clear-audio frame, but audio must stop immediately, not one round trip
++      // later.
++      aemeathProtocol.cancelAllTurns();
++      sendMessage({ type: 'aemeath-set-mode', mode });
++    },
++    [sendMessage],
++  );
++
++  const setSwitch = useCallback(
++    (name: 'microphone' | 'screen' | 'proactive', enabled: boolean) => {
++      sendMessage({ type: 'aemeath-set-switch', switch: name, enabled });
++    },
++    [sendMessage],
++  );
++
++  const requestScreen = useCallback(() => {
++    sendMessage({ type: 'aemeath-screen-request', force: true });
++  }, [sendMessage]);
++
++  const reportTyping = useCallback(
++    (typing: boolean) => {
++      if (typing) {
++        if (!typingReported.current) {
++          typingReported.current = true;
++          sendMessage({ type: 'aemeath-activity', typing: true });
++        }
++        if (typingTimer.current) clearTimeout(typingTimer.current);
++        typingTimer.current = setTimeout(() => {
++          typingReported.current = false;
++          sendMessage({ type: 'aemeath-activity', typing: false });
++        }, TYPING_IDLE_MS);
++        return;
++      }
++      if (typingTimer.current) clearTimeout(typingTimer.current);
++      if (typingReported.current) {
++        typingReported.current = false;
++        sendMessage({ type: 'aemeath-activity', typing: false });
++      }
++    },
++    [sendMessage],
++  );
++
++  const reportVoiceActivity = useCallback(
++    (active: boolean) => {
++      sendMessage({ type: 'aemeath-activity', voice_active: active });
++    },
++    [sendMessage],
++  );
++
++  const requestMemories = useCallback(() => {
++    sendMessage({ type: 'aemeath-memory-query', action: 'list' });
++  }, [sendMessage]);
++
++  const forgetMemory = useCallback(
++    (memoryId: string, fragments?: string[]) => {
++      sendMessage({
++        type: 'aemeath-memory-query',
++        action: 'forget',
++        memory_id: memoryId,
++        fragments,
++      });
++    },
++    [sendMessage],
++  );
++
++  // Keep the rendered state in step with the protocol object.
++  useEffect(() => {
++    const interval = setInterval(() => {
++      setState((previous) => {
++        const next: AemeathState = {
++          mode: aemeathProtocol.mode,
++          state_version: aemeathProtocol.stateVersion,
++          microphone_enabled: previous?.microphone_enabled ?? false,
++          screen_observation_enabled: previous?.screen_observation_enabled ?? false,
++          proactive_enabled: previous?.proactive_enabled ?? false,
++          user_paused: previous?.user_paused ?? false,
++          voice_allowed: aemeathProtocol.voiceAllowed,
++        };
++        return next;
++      });
++    }, 500);
++    return () => clearInterval(interval);
++  }, []);
++
++  const value = useMemo(
++    () => ({
++      negotiated,
++      state,
++      setMode,
++      setSwitch,
++      requestScreen,
++      reportTyping,
++      reportVoiceActivity,
++      requestMemories,
++      forgetMemory,
++    }),
++    [
++      negotiated,
++      state,
++      setMode,
++      setSwitch,
++      requestScreen,
++      reportTyping,
++      reportVoiceActivity,
++      requestMemories,
++      forgetMemory,
++    ],
++  );
++
++  return (
++    <AemeathContext.Provider value={value}>{children}</AemeathContext.Provider>
++  );
++}
+diff --git a/src/renderer/src/context/vad-context.tsx b/src/renderer/src/context/vad-context.tsx
+index f38a4e6..f521da7 100644
+--- a/src/renderer/src/context/vad-context.tsx
++++ b/src/renderer/src/context/vad-context.tsx
+@@ -11,6 +11,7 @@ import { SubtitleContext } from './subtitle-context';
+ import { AiStateContext, AiState } from './ai-state-context';
+ import { useLocalStorage } from '@/hooks/utils/use-local-storage';
+ import { toaster } from '@/components/ui/toaster';
++import { aemeathProtocol } from '@/services/aemeath-protocol';
+ 
+ /**
+  * VAD settings configuration interface
+@@ -240,6 +241,8 @@ export function VADProvider({ children }: { children: React.ReactNode }) {
+     }
+ 
+     setPreviousTriggeredProbability(0);
++    aemeathProtocol.resetCancelledAll();
++    (window as any).__aemeathTiming?.beginPlayback?.();
+     sendAudioPartitionRef.current(audio);
+     isProcessingRef.current = false;
+     setAiStateRef.current("thinking-speaking");
+diff --git a/src/renderer/src/hooks/footer/use-text-input.tsx b/src/renderer/src/hooks/footer/use-text-input.tsx
+index d2499ff..3fa66f5 100644
+--- a/src/renderer/src/hooks/footer/use-text-input.tsx
++++ b/src/renderer/src/hooks/footer/use-text-input.tsx
+@@ -4,6 +4,7 @@ import { useAiState } from '@/context/ai-state-context';
+ import { useInterrupt } from '@/components/canvas/live2d';
+ import { useChatHistory } from '@/context/chat-history-context';
+ import { useVAD } from '@/context/vad-context';
++import { aemeathProtocol } from '@/services/aemeath-protocol';
+ import { useMediaCapture } from '@/hooks/utils/use-media-capture';
+ 
+ export function useTextInput() {
+@@ -25,10 +26,25 @@ export function useTextInput() {
+     if (aiState === 'thinking-speaking') {
+       interrupt();
+     }
++    aemeathProtocol.resetCancelledAll();
+ 
+     const images = await captureAllMedia();
+ 
+     appendHumanMessage(inputText.trim());
++
++    // Start the "submitted -> first reply shown" stopwatch before sending.
++    //
++    // The backend cannot measure this: its clock shares no origin with the page
++    // and it starts when the message arrives, missing transport and render time.
++    // Only the client knows when the user pressed Enter.
++    //
++    // The turn id is assigned by the backend, so the stopwatch is opened
++    // *unbound* here and bound by the handler when the first ``aemeath-text``
++    // for this send arrives. Without this call no ``aemeath-display-receipt``
++    // is ever sent and every client_first_text_ms arrives null, which would
++    // leave the latency target permanently at "no samples".
++    (window as any).__aemeathTiming?.beginTextPending?.();
++
+     wsContext.sendMessage({
+       type: 'text-input',
+       text: inputText.trim(),
+diff --git a/src/renderer/src/hooks/utils/use-audio-task.ts b/src/renderer/src/hooks/utils/use-audio-task.ts
+index 27cba68..60b858f 100644
+--- a/src/renderer/src/hooks/utils/use-audio-task.ts
++++ b/src/renderer/src/hooks/utils/use-audio-task.ts
+@@ -12,6 +12,7 @@ import { toaster } from '@/components/ui/toaster';
+ import { useWebSocket } from '@/context/websocket-context';
+ import { DisplayText } from '@/services/websocket-service';
+ import { useLive2DExpression } from '@/hooks/canvas/use-live2d-expression';
++import { aemeathProtocol } from '@/services/aemeath-protocol';
+ import * as LAppDefine from '../../../WebSDK/src/lappdefine';
+ 
+ // Simple type alias for Live2D model
+@@ -25,6 +26,10 @@ interface AudioTaskOptions {
+   expressions?: string[] | number[] | null
+   speaker_uid?: string
+   forwarded?: boolean
++  /** Aemeath turn this audio belongs to, when the backend supplied one. */
++  turnId?: string | null
++  /** Aemeath audio slice id, used for playback receipts and deduplication. */
++  audioSliceId?: string | null
+ }
+ 
+ /**
+@@ -80,6 +85,19 @@ export const useAudioTask = () => {
+       return;
+     }
+ 
++    // Skip audio for a turn the client has already cancelled, or a slice that
++    // has already played. This is the last gate before sound is produced.
++    if (!aemeathProtocol.isTurnValid(options.turnId)) {
++      console.warn('Audio blocked: turn is cancelled.', options.turnId);
++      resolve();
++      return;
++    }
++    if (!aemeathProtocol.claimSlice(options.audioSliceId)) {
++      console.warn('Audio blocked: slice already played.', options.audioSliceId);
++      resolve();
++      return;
++    }
++
+     const { audioBase64, displayText, expressions, forwarded } = options;
+ 
+     // Update display text
+@@ -150,7 +168,7 @@ export const useAudioTask = () => {
+         const audio = new Audio(audioDataUrl);
+         
+         // Register with global audio manager IMMEDIATELY after creating audio
+-        audioManager.setCurrentAudio(audio, model);
++        audioManager.setCurrentAudio(audio, model, options.turnId);
+         let isFinished = false;
+ 
+         const cleanup = () => {
+@@ -172,12 +190,33 @@ export const useAudioTask = () => {
+             return;
+           }
+ 
++          // One more validity check: the mode may have changed while the audio
++          // was decoding, which is exactly the classroom case.
++          if (!aemeathProtocol.isTurnValid(options.turnId) || !aemeathProtocol.audioPermitted()) {
++            console.warn('Audio playback cancelled: turn invalid or audio not permitted');
++            cleanup();
++            return;
++          }
++
+           console.log('Starting audio playback with lip sync');
+           audio.play().catch((err) => {
+             console.error("Audio play error:", err);
+             cleanup();
+           });
+ 
++          // Report that playback actually began, with the client-measured
++          // duration since the user stopped speaking.
++          const elapsed = (window as any).__aemeathTiming?.playbackElapsed?.();
++          if (options.audioSliceId || options.turnId) {
++            sendMessage({
++              type: 'aemeath-playback-receipt',
++              phase: 'started',
++              turn_id: options.turnId ?? null,
++              audio_slice_id: options.audioSliceId ?? null,
++              client_elapsed_ms: elapsed ?? null,
++            });
++          }
++
+           // Setup lip sync
+           if (model._wavFileHandler) {
+             if (!model._wavFileHandler._initialized) {
+@@ -203,6 +242,15 @@ export const useAudioTask = () => {
+ 
+         audio.addEventListener('ended', () => {
+           console.log("Audio playback completed");
++          if (options.turnId || options.audioSliceId) {
++            sendMessage({
++              type: 'aemeath-playback-receipt',
++              phase: 'finished',
++              turn_id: options.turnId ?? null,
++              audio_slice_id: options.audioSliceId ?? null,
++            });
++          }
++          (window as any).__aemeathTiming?.clearPlayback?.();
+           cleanup();
+         });
+ 
+diff --git a/src/renderer/src/hooks/utils/use-interrupt.ts b/src/renderer/src/hooks/utils/use-interrupt.ts
+index 5986aa2..7664fa0 100644
+--- a/src/renderer/src/hooks/utils/use-interrupt.ts
++++ b/src/renderer/src/hooks/utils/use-interrupt.ts
+@@ -4,6 +4,8 @@ import { useChatHistory } from '@/context/chat-history-context';
+ import { audioTaskQueue } from '@/utils/task-queue';
+ import { useSubtitle } from '@/context/subtitle-context';
+ import { useAudioTask } from './use-audio-task';
++import { aemeathProtocol } from '@/services/aemeath-protocol';
++import { audioManager } from '@/utils/audio-manager';
+ 
+ export const useInterrupt = () => {
+   const { aiState, setAiState } = useAiState();
+@@ -17,11 +19,31 @@ export const useInterrupt = () => {
+     if (aiState !== 'thinking-speaking') return;
+     console.log('Interrupting conversation chain');
+ 
++    const currentTurnId = audioManager.getCurrentTurnId() || (aemeathProtocol as any).latestTurnId || '';
++    const t0 = performance.now();
++
++    // Mark every in-flight turn cancelled first, so audio that is still
++    // decoding cannot start playing after this point.
++    aemeathProtocol.cancelAllTurns();
++
+     stopCurrentAudioAndLipSync();
+ 
+     audioTaskQueue.clearQueue();
+ 
++    const elapsed = performance.now() - t0;
++
+     setAiState('interrupted');
++    setTimeout(() => {
++      setAiState((curr) => (curr === 'interrupted' ? 'idle' : curr));
++    }, 800);
++
++    if (currentTurnId) {
++      sendMessage({
++        type: 'aemeath-cancel-receipt',
++        turn_id: currentTurnId,
++        client_elapsed_ms: elapsed,
++      });
++    }
+ 
+     if (sendSignal) {
+       sendMessage({
+diff --git a/src/renderer/src/services/aemeath-protocol.ts b/src/renderer/src/services/aemeath-protocol.ts
+new file mode 100644
+index 0000000..5154b61
+--- /dev/null
++++ b/src/renderer/src/services/aemeath-protocol.ts
+@@ -0,0 +1,180 @@
++/* eslint-disable @typescript-eslint/no-explicit-any */
++/**
++ * Aemeath client protocol state.
++ *
++ * The backend tags every frame with a connection generation, a turn id, an
++ * audio slice id and a situation state version. Two things depend on those
++ * fields and are the reason this module exists:
++ *
++ * 1. **Stale output rejection.** When the user switches to class mode or
++ *    interrupts, audio that was already synthesised must be discarded rather
++ *    than played. The backend drops most of it, but a frame already in flight
++ *    has to be rejected here too, on the client.
++ * 2. **Honest metrics.** The durations the user actually experiences are
++ *    measured here with a single monotonic clock and reported as one number,
++ *    so the backend never has to subtract two different time bases.
++ */
++
++/** Protocol version this client speaks. */
++export const AEMEATH_PROTOCOL_VERSION = 2;
++
++/** Situation state as reported by the backend. */
++export interface AemeathState {
++  mode: 'normal' | 'class';
++  state_version: number;
++  microphone_enabled: boolean;
++  screen_observation_enabled: boolean;
++  proactive_enabled: boolean;
++  user_paused: boolean;
++  voice_allowed: boolean;
++}
++
++/**
++ * Tracks which output is still valid.
++ *
++ * It is deliberately a plain class rather than React state: the audio queue
++ * consults it synchronously while playing, and a stale value from a render
++ * closure is exactly the bug this is meant to prevent.
++ */
++export class AemeathProtocolState {
++  /** Connection generation; frames from an older generation are ignored. */
++  generation = 0;
++
++  /** Latest situation state version seen from the backend. */
++  stateVersion = 0;
++
++  mode: 'normal' | 'class' = 'normal';
++
++  voiceAllowed = true;
++
++  /** Turn ids cancelled locally, e.g. by the stop button. */
++  private cancelledTurns = new Set<string>();
++
++  /** Slice ids already played, so a duplicate frame is not played twice. */
++  private playedSlices = new Set<string>();
++
++  /** Whether the client negotiated the Aemeath protocol at all. */
++  negotiated = false;
++
++  /**
++   * Handle a state update from the backend.
++   *
++   * Older versions are ignored so an out-of-order frame cannot restore a mode
++   * the user has already left.
++   */
++  applyState(state: AemeathState, generation?: number): boolean {
++    if (generation !== undefined && generation < this.generation) {
++      return false;
++    }
++    if (state.state_version < this.stateVersion) {
++      return false;
++    }
++    this.stateVersion = state.state_version;
++    this.mode = state.mode;
++    this.voiceAllowed = state.voice_allowed;
++    return true;
++  }
++
++  /** Record a new connection generation, invalidating older output. */
++  setGeneration(generation: number): void {
++    this.generation = generation;
++    // Everything from the previous connection is void.
++    this.cancelledTurns.clear();
++    this.playedSlices.clear();
++    this.stateVersion = 0;
++  }
++
++  /** Mark a turn cancelled so its late frames are refused. */
++  cancelTurn(turnId: string): void {
++    if (turnId) this.cancelledTurns.add(turnId);
++  }
++
++  /** Cancel every turn, as an interrupt or a mode switch does. */
++  cancelAllTurns(): void {
++    this.cancelledTurns.add('*');
++  }
++
++  /** Reset catch-all cancellation so newly started turns can play. */
++  resetCancelledAll(): void {
++    this.cancelledTurns.delete('*');
++  }
++
++  /** Whether output for a turn is still valid. */
++  isTurnValid(turnId?: string | null): boolean {
++    if (this.cancelledTurns.has('*')) return false;
++    if (!turnId) return true;
++    return !this.cancelledTurns.has(turnId);
++  }
++
++  /** Whether a slice may be played, and record it as played. */
++  claimSlice(sliceId?: string | null): boolean {
++    if (!sliceId) return true;
++    if (this.playedSlices.has(sliceId)) return false;
++    this.playedSlices.add(sliceId);
++    return true;
++  }
++
++  /** Whether audio is permitted in the current mode. */
++  audioPermitted(): boolean {
++    return this.mode === 'normal' && this.voiceAllowed;
++  }
++
++  /**
++   * Decide whether an incoming audio frame should be played.
++   *
++   * This is the client-side check the plan requires: a frame that is valid for
++   * a turn but marked with an older state version, or that arrives while the
++   * client is muted, must not be queued.
++   */
++  shouldAcceptAudio(frame: {
++    turn_id?: string;
++    audio_slice_id?: string;
++    state_version?: number;
++    generation?: number;
++  }): boolean {
++    if (frame.generation !== undefined && frame.generation < this.generation) {
++      return false;
++    }
++    if (
++      frame.state_version !== undefined &&
++      frame.state_version < this.stateVersion
++    ) {
++      return false;
++    }
++    if (!this.isTurnValid(frame.turn_id)) return false;
++    if (!this.audioPermitted()) return false;
++    return true;
++  }
++}
++
++/**
++ * Monotonic stopwatch used for user-experienced latency.
++ *
++ * `performance.now()` shares one origin within the page, so every duration
++ * measured here is directly comparable with every other one — unlike wall
++ * clock values, which must never be subtracted across processes.
++ */
++export class ClientStopwatch {
++  private start = 0;
++
++  /** Begin measuring. */
++  begin(): void {
++    this.start = now();
++  }
++
++  /** Elapsed milliseconds since :meth:`begin`. */
++  elapsed(): number {
++    return Math.max(0, now() - this.start);
++  }
++}
++
++/** Monotonic clock, falling back when `performance` is unavailable. */
++export function now(): number {
++  if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
++    return performance.now();
++  }
++  return Date.now();
++}
++
++/** Shared protocol state for the whole client. */
++export const aemeathProtocol = new AemeathProtocolState();
+diff --git a/src/renderer/src/services/websocket-handler.tsx b/src/renderer/src/services/websocket-handler.tsx
+index 5283617..46646af 100644
+--- a/src/renderer/src/services/websocket-handler.tsx
++++ b/src/renderer/src/services/websocket-handler.tsx
+@@ -5,7 +5,7 @@ import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
+ import { useTranslation } from 'react-i18next';
+ import { wsService, MessageEvent } from '@/services/websocket-service';
+ import {
+-  WebSocketContext, HistoryInfo, defaultWsUrl, defaultBaseUrl,
++  WebSocketContext, HistoryInfo, defaultWsUrl, defaultBaseUrl, useWebSocket,
+ } from '@/context/websocket-context';
+ import { ModelInfo, useLive2DConfig } from '@/context/live2d-config-context';
+ import { useSubtitle } from '@/context/subtitle-context';
+@@ -21,6 +21,7 @@ import { useLocalStorage } from '@/hooks/utils/use-local-storage';
+ import { useGroup } from '@/context/group-context';
+ import { useInterrupt } from '@/hooks/utils/use-interrupt';
+ import { useBrowser } from '@/context/browser-context';
++import { aemeathProtocol, ClientStopwatch } from '@/services/aemeath-protocol';
+ 
+ function WebSocketHandler({ children }: { children: React.ReactNode }) {
+   const { t } = useTranslation();
+@@ -31,16 +32,65 @@ function WebSocketHandler({ children }: { children: React.ReactNode }) {
+   const { setModelInfo } = useLive2DConfig();
+   const { setSubtitleText } = useSubtitle();
+   const { clearResponse, setForceNewMessage, appendHumanMessage, appendOrUpdateToolCallMessage } = useChatHistory();
+-  const { addAudioTask } = useAudioTask();
++  const { addAudioTask, stopCurrentAudioAndLipSync } = useAudioTask();
+   const bgUrlContext = useBgUrl();
+   const { confUid, setConfName, setConfUid, setConfigFiles } = useConfig();
+   const [pendingModelInfo, setPendingModelInfo] = useState<ModelInfo | undefined>(undefined);
+   const { setSelfUid, setGroupMembers, setIsOwner } = useGroup();
+   const { startMic, stopMic, autoStartMicOnConvEnd } = useVAD();
++  const { sendMessage } = useWebSocket();
+   const autoStartMicOnConvEndRef = useRef(autoStartMicOnConvEnd);
+   const { interrupt } = useInterrupt();
+   const { setBrowserViewData } = useBrowser();
+ 
++  // Aemeath timing windows, measured on the client's own monotonic clock.
++  // ``pending`` marks a stopwatch opened on send whose turn id is not yet known.
++  const textStopwatchRef = useRef<
++    { turnId: string; watch: ClientStopwatch; pending?: boolean } | null
++  >(null);
++  const cancelStopwatchRef = useRef<{ turnId: string; watch: ClientStopwatch } | null>(null);
++  const playbackStopwatchRef = useRef<ClientStopwatch | null>(null);
++
++  // Expose the timing handles so the audio hook can report durations without
++  // threading them through every component.
++  useEffect(() => {
++    (window as any).__aemeathTiming = {
++      /**
++       * Start the submit-to-display stopwatch without knowing the turn id yet.
++       *
++       * The id is assigned by the backend, so the stopwatch is opened unbound
++       * and bound by the first ``aemeath-text`` that follows. Starting it on
++       * send is what makes the measurement cover transport and render time,
++       * which the backend's own clock cannot see.
++       */
++      beginTextPending: () => {
++        textStopwatchRef.current = {
++          turnId: '',
++          watch: new ClientStopwatch(),
++          pending: true,
++        };
++        textStopwatchRef.current.watch.begin();
++      },
++      beginText: (turnId: string) => {
++        textStopwatchRef.current = { turnId, watch: new ClientStopwatch() };
++        textStopwatchRef.current.watch.begin();
++      },
++      beginPlayback: () => {
++        playbackStopwatchRef.current = new ClientStopwatch();
++        playbackStopwatchRef.current.begin();
++      },
++      playbackElapsed: () => playbackStopwatchRef.current?.elapsed() ?? null,
++      clearPlayback: () => {
++        playbackStopwatchRef.current = null;
++      },
++      beginCancel: (turnId: string) => {
++        cancelStopwatchRef.current = { turnId, watch: new ClientStopwatch() };
++        cancelStopwatchRef.current.watch.begin();
++      },
++      protocol: aemeathProtocol,
++    };
++  }, []);
++
+   useEffect(() => {
+     autoStartMicOnConvEndRef.current = autoStartMicOnConvEnd;
+   }, [autoStartMicOnConvEnd]);
+@@ -67,6 +117,7 @@ function WebSocketHandler({ children }: { children: React.ReactNode }) {
+         stopMic();
+         break;
+       case 'conversation-chain-start':
++        aemeathProtocol.resetCancelledAll();
+         setAiState('thinking-speaking');
+         audioTaskQueue.clearQueue();
+         clearResponse();
+@@ -91,8 +142,130 @@ function WebSocketHandler({ children }: { children: React.ReactNode }) {
+     }
+   }, [setAiState, clearResponse, setForceNewMessage, startMic, stopMic]);
+ 
++  /**
++   * Handle Aemeath protocol frames.
++   *
++   * Returns true when the frame was an Aemeath frame and has been handled, so
++   * the caller does not fall through to upstream's handlers.
++   */
++  const handleAemeathMessage = useCallback((message: MessageEvent): boolean => {
++    const anyMessage = message as any;
++
++    switch (message.type) {
++      case 'aemeath-hello-ack':
++        // Connection generation invalidates everything from a previous one.
++        aemeathProtocol.setGeneration(anyMessage.generation ?? 0);
++        aemeathProtocol.negotiated = Boolean(anyMessage.accepted);
++        aemeathProtocol.applyState(
++          anyMessage.state,
++          anyMessage.generation ?? 0,
++        );
++        if (!anyMessage.accepted) {
++          console.warn(
++            'Backend does not accept this client as a full Aemeath client:',
++            anyMessage.negotiated_version,
++          );
++        }
++        return true;
++
++      case 'aemeath-state':
++        aemeathProtocol.applyState(
++          anyMessage.state,
++          anyMessage.generation ?? 0,
++        );
++        return true;
++
++      case 'aemeath-clear-audio':
++        // Stop the current sound, drop the queue, and refuse anything older
++        // than the state version that triggered this.
++        audioTaskQueue.clearQueue();
++        stopCurrentAudioAndLipSync();
++        aemeathProtocol.cancelAllTurns();
++        setAiState('idle');
++        // Tell the backend the stop is complete, with how long it took.
++        if (cancelStopwatchRef.current) {
++          sendMessage({
++            type: 'aemeath-cancel-receipt',
++            turn_id: cancelStopwatchRef.current.turnId,
++            client_elapsed_ms: cancelStopwatchRef.current.watch.elapsed(),
++          });
++          cancelStopwatchRef.current = null;
++        }
++        return true;
++
++      case 'aemeath-text':
++        aemeathProtocol.resetCancelledAll();
++        if (anyMessage.turn_id) {
++          (aemeathProtocol as any).latestTurnId = anyMessage.turn_id;
++        }
++        // Text display is independent of audio; class mode still shows this.
++        if (anyMessage.text) {
++          setSubtitleText(anyMessage.text);
++          const watch = textStopwatchRef.current;
++          // Accept either an already-bound stopwatch or a pending one opened
++          // on send, which this first reply now binds to its turn id.
++          if (watch && (watch.pending || watch.turnId === anyMessage.turn_id)) {
++            sendMessage({
++              type: 'aemeath-display-receipt',
++              turn_id: anyMessage.turn_id,
++              client_elapsed_ms: watch.watch.elapsed(),
++            });
++            textStopwatchRef.current = null;
++          }
++        }
++        return true;
++
++      case 'aemeath-screen-summary':
++        if (anyMessage.summary) {
++          setSubtitleText(anyMessage.summary);
++        }
++        return true;
++
++      case 'aemeath-screen-unavailable':
++        toaster.create({
++          title: `屏幕观察不可用：${anyMessage.reason ?? '未知原因'}`,
++          type: 'warning',
++          duration: 4000,
++        });
++        return true;
++
++      case 'aemeath-proactive-decision':
++        if (!anyMessage.eligible) {
++          console.log('Proactive declined:', anyMessage.reason);
++        }
++        return true;
++
++      case 'aemeath-unavailable':
++        console.warn('This backend is not running the Aemeath agent.');
++        return true;
++
++      case 'aemeath-memory-list':
++        console.log('Memories:', anyMessage.memories);
++        return true;
++
++      case 'aemeath-memory-forget-result':
++        toaster.create({
++          title: anyMessage.success ? '已遗忘这条记忆' : `遗忘未完成：${anyMessage.reason}`,
++          type: anyMessage.success ? 'success' : 'warning',
++          duration: 3000,
++        });
++        return true;
++
++      default:
++        return false;
++    }
++  }, [sendMessage, setAiState, setSubtitleText, stopCurrentAudioAndLipSync]);
++
+   const handleWebSocketMessage = useCallback((message: MessageEvent) => {
+     console.log('Received message from server:', message);
++
++    // Aemeath frames are handled first: they carry the ids and state versions
++    // that decide whether ordinary frames are still valid.
++    if (message.type?.startsWith('aemeath-')) {
++      handleAemeathMessage(message);
++      return;
++    }
++
+     switch (message.type) {
+       case 'control':
+         if (message.text) {
+@@ -153,9 +326,25 @@ function WebSocketHandler({ children }: { children: React.ReactNode }) {
+         }
+         break;
+       case 'audio':
+-        if (aiState === 'interrupted' || aiState === 'listening') {
++        // Reject audio that is no longer valid: a superseded turn, an older
++        // state version, or a mode that forbids speech. The backend drops most
++        // late audio, but a frame already in flight has to be refused here.
++        if (
++          aemeathProtocol.negotiated &&
++          !aemeathProtocol.shouldAcceptAudio(message as any)
++        ) {
++          console.log(
++            'Audio frame rejected (stale turn, stale state, or muted):',
++            message.display_text?.text,
++          );
++          break;
++        }
++        if (aiState === 'listening') {
+           console.log('Audio playback intercepted. Sentence:', message.display_text?.text);
+         } else {
++          if ((message as any).turn_id) {
++            (aemeathProtocol as any).latestTurnId = (message as any).turn_id;
++          }
+           console.log("actions", message.actions);
+           addAudioTask({
+             audioBase64: message.audio || '',
+@@ -164,6 +353,8 @@ function WebSocketHandler({ children }: { children: React.ReactNode }) {
+             displayText: message.display_text || null,
+             expressions: message.actions?.expressions || null,
+             forwarded: message.forwarded || false,
++            turnId: (message as any).turn_id ?? null,
++            audioSliceId: (message as any).audio_slice_id ?? null,
+           });
+         }
+         break;
+@@ -289,7 +480,7 @@ function WebSocketHandler({ children }: { children: React.ReactNode }) {
+       default:
+         console.warn('Unknown message type:', message.type);
+     }
+-  }, [aiState, addAudioTask, appendHumanMessage, baseUrl, bgUrlContext, setAiState, setConfName, setConfUid, setConfigFiles, setCurrentHistoryUid, setHistoryList, setMessages, setModelInfo, setSubtitleText, startMic, stopMic, setSelfUid, setGroupMembers, setIsOwner, backendSynthComplete, setBackendSynthComplete, clearResponse, handleControlMessage, appendOrUpdateToolCallMessage, interrupt, setBrowserViewData, t]);
++  }, [aiState, addAudioTask, appendHumanMessage, baseUrl, bgUrlContext, setAiState, setConfName, setConfUid, setConfigFiles, setCurrentHistoryUid, setHistoryList, setMessages, setModelInfo, setSubtitleText, startMic, stopMic, setSelfUid, setGroupMembers, setIsOwner, backendSynthComplete, setBackendSynthComplete, clearResponse, handleControlMessage, appendOrUpdateToolCallMessage, interrupt, setBrowserViewData, t, handleAemeathMessage]);
+ 
+   useEffect(() => {
+     wsService.connect(wsUrl);
+diff --git a/src/renderer/src/services/websocket-service.tsx b/src/renderer/src/services/websocket-service.tsx
+index ad2b79f..343f025 100644
+--- a/src/renderer/src/services/websocket-service.tsx
++++ b/src/renderer/src/services/websocket-service.tsx
+@@ -6,6 +6,7 @@ import { ModelInfo } from '@/context/live2d-config-context';
+ import { HistoryInfo } from '@/context/websocket-context';
+ import { ConfigFile } from '@/context/character-config-context';
+ import { toaster } from '@/components/ui/toaster';
++import { AEMEATH_PROTOCOL_VERSION } from '@/services/aemeath-protocol';
+ 
+ export interface DisplayText {
+   text: string;
+@@ -124,6 +125,23 @@ class WebSocketService {
+   }
+ 
+   private initializeConnection() {
++    // Aemeath protocol negotiation comes first, so the backend knows whether
++    // this client can be treated as a full Aemeath client before any output is
++    // produced.
++    this.sendMessage({
++      type: 'aemeath-hello',
++      protocol_version: AEMEATH_PROTOCOL_VERSION,
++      capabilities: [
++        'clear-audio',
++        'receipts',
++        'display-receipt',
++        'playback-receipt',
++        'cancel-receipt',
++        'activity',
++        'screens',
++        'memory-management',
++      ],
++    });
+     this.sendMessage({
+       type: 'fetch-backgrounds',
+     });
+diff --git a/src/renderer/src/utils/audio-manager.ts b/src/renderer/src/utils/audio-manager.ts
+index 7caa275..3e39de4 100644
+--- a/src/renderer/src/utils/audio-manager.ts
++++ b/src/renderer/src/utils/audio-manager.ts
+@@ -5,13 +5,19 @@
+ class AudioManager {
+   private currentAudio: HTMLAudioElement | null = null;
+   private currentModel: any | null = null;
++  private currentTurnId: string | null = null;
+ 
+   /**
+    * Set the current playing audio
+    */
+-  setCurrentAudio(audio: HTMLAudioElement, model: any) {
++  setCurrentAudio(audio: HTMLAudioElement, model: any, turnId?: string | null) {
+     this.currentAudio = audio;
+     this.currentModel = model;
++    this.currentTurnId = turnId ?? null;
++  }
++
++  getCurrentTurnId(): string | null {
++    return this.currentTurnId;
+   }
+ 
+   /**
+@@ -52,6 +58,7 @@ class AudioManager {
+       // Clear references
+       this.currentAudio = null;
+       this.currentModel = null;
++      this.currentTurnId = null;
+     } else {
+       console.log('[AudioManager] No current audio playing to stop.');
+     }
+@@ -64,6 +71,7 @@ class AudioManager {
+     if (this.currentAudio === audio) {
+       this.currentAudio = null;
+       this.currentModel = null;
++      this.currentTurnId = null;
+     }
+   }
+ 

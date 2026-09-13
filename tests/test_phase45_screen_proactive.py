@@ -36,14 +36,21 @@ def manager(tmp_path):
 
 
 def make_observer(vision=None, backend=None, **kwargs):
-    """Build a ScreenObserver with doubles."""
+    """Build a ScreenObserver with doubles, observation switched on.
+
+    The observer refuses to capture while it is off, so a unit test about
+    capture, throttling or caching has to enable it first. The switch itself is
+    exercised through the bridge, which is where it belongs.
+    """
     params = {"max_edge_px": 1600, "min_interval_seconds": 60, "min_stable_seconds": 10}
     params.update(kwargs)
-    return ScreenObserver(
+    observer = ScreenObserver(
         backend or FakeScreenCapture(FakeWindow("main.py - VS Code")),
         vision or FakeVision(),
         **params,
     )
+    observer.set_enabled(True)
+    return observer
 
 
 class TestScreenObservation:

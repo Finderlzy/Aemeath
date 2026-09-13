@@ -279,10 +279,16 @@ class TestScreenObservation:
         )
 
     async def test_manual_request_returns_summary(self, make_harness):
-        """A manual request captures and reports a summary."""
+        """A manual request captures and reports a summary.
+
+        Observation is switched on first: ``force`` skips the throttling gates,
+        not the on/off switch, and a request with observation off must produce
+        nothing at all (see ``test_screen_lifecycle.py``).
+        """
         capture = FakeScreenCapture(FakeWindow(title="编辑器"))
         vision = FakeVision("用户正在写代码。")
         harness = self._screen_harness(make_harness, vision=vision, capture=capture)
+        await harness.bridge.set_switch("screen", True)
         harness.websocket.clear()
 
         observation = await harness.bridge.on_screen_request(force=True)
@@ -298,8 +304,10 @@ class TestScreenObservation:
     ):
         """A summary that returns after the switch was turned off is dropped.
 
-        The plan requires the generation be re-checked after the await, so a
-        slow vision call cannot write back into a state the user has left.
+        Asserts the observer cache as well as the outbound frame. Refusing to
+        send the frame is not enough on its own: the defect this guards was
+        exactly that the bridge declined to forward the summary while the
+        observer still cached it, so a frame-only assertion stayed green.
         """
         capture = FakeScreenCapture(FakeWindow(title="编辑器"))
         vision = SlowVision("迟到的摘要。")
@@ -318,6 +326,10 @@ class TestScreenObservation:
         result = await asyncio.wait_for(request, timeout=5.0)
         assert result is None, "a stale observation must not be written back"
         assert harness.websocket.frames_of("aemeath-screen-summary") == []
+        assert harness.runtime.screen.current_summary() is None, (
+            "the observer must not cache a summary from a period the user left"
+        )
+        assert harness.runtime.screen.latest is None
 
     async def test_disabling_clears_current_summary(self, make_harness):
         """Turning observation off forgets the cached summary."""

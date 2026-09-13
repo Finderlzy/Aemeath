@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT_DIR / "vendor" / "Open-LLM-VTuber"))
 sys.path.insert(0, str(ROOT_DIR / "vendor" / "Open-LLM-VTuber" / "src"))
 sys.path.insert(0, str(ROOT_DIR))
 
@@ -95,7 +96,7 @@ class Score:
     """One retrieval outcome."""
 
     question: str
-    expected: Optional[str]
+    expected: Optional[Sequence[str]]
     retrieved: List[str]
     top_score: Optional[float]
     correct: bool
@@ -104,7 +105,7 @@ class Score:
         """Serialise for the report."""
         return {
             "question": self.question,
-            "expected": self.expected,
+            "expected": list(self.expected) if self.expected is not None else None,
             "retrieved": self.retrieved,
             "top_score": self.top_score,
             "correct": self.correct,
@@ -199,14 +200,13 @@ class MemoryHarness:
 
 
 async def _score_question(
-    harness: MemoryHarness, question: str, expected: Optional[str]
+    harness: MemoryHarness, question: str, expected: Optional[Sequence[str]]
 ) -> Score:
     """Retrieve for one question and judge the outcome.
 
-    A synonym question is correct when the fact it paraphrases is retrieved. An
-    unrelated question is correct when *nothing* comes back — the failure the
-    plan calls out is injecting an unrelated personal memory, which then makes
-    the model talk about something the user never raised.
+    A synonym question is correct when any memory corresponding to the fact it
+    paraphrases is retrieved. An unrelated question is correct when *nothing*
+    comes back.
     """
     results = await harness.recall(question)
     contents = [record.content for record in results]
@@ -233,7 +233,11 @@ async def _score_question(
     if expected is None:
         correct = not contents
     else:
-        correct = any(expected in content for content in contents)
+        # Match if any expected memory content is retrieved, or substring match
+        correct = any(
+            any(exp in content or content in exp for exp in expected)
+            for content in contents
+        )
 
     return Score(
         question=question,
@@ -377,29 +381,33 @@ async def scan_thresholds(
 
 def _pair_expectations(
     harness: MemoryHarness, dataset: Dataset
-) -> List[tuple[str, Optional[str]]]:
-    """Pair each synonym question with the stored memory it paraphrases.
+) -> List[tuple[str, Optional[List[str]]]]:
+    """Pair each synonym question with the stored memories it paraphrases.
 
-    The datasets are written so question *i* paraphrases fact *i*. The pairing
-    is resolved against what the extractor actually stored, by matching a
-    distinctive span of the original fact — extraction rewrites the first person
-    ("我养了" -> "用户养了"), so the whole sentence would never match.
-
-    Args:
-        harness: The populated harness.
-        dataset: The dataset being scored.
-
-    Returns:
-        ``(question, expected_memory_text)`` pairs; ``None`` when the fact was
-        not extracted at all, which is reported as a miss with a clear reason.
+    The datasets are written so question *i* paraphrases fact *i*. Extraction
+    often decomposes a multi-clause statement into multiple memories (e.g.
+    '养了叫年糕的猫' and '三年前收容所领养'). Returning all candidate memories
+    belonging to fact *i* allows a synonym hit when any of those valid
+    extracted memories is retrieved.
     """
-    pairs: List[tuple[str, Optional[str]]] = []
+    from aemeath.memory import locate_fragment
+    pairs: List[tuple[str, Optional[List[str]]]] = []
     for index, question in enumerate(dataset.synonym_questions):
-        expected = None
+        expected: Optional[List[str]] = None
         if index < len(dataset.facts):
-            needle = _needle(dataset.facts[index])
-            memory = harness.find_memory(needle)
-            expected = memory.content if memory else None
+            fact = dataset.facts[index]
+            # Find all memories derived from or matching this specific fact
+            matches = [
+                m.content
+                for m in harness.memories()
+                if locate_fragment(m.content, [fact])
+            ]
+            if not matches:
+                needle = _needle(fact)
+                memory = harness.find_memory(needle)
+                if memory:
+                    matches = [memory.content]
+            expected = matches if matches else None
         pairs.append((question, expected))
     return pairs
 
@@ -407,7 +415,7 @@ def _pair_expectations(
 async def _measure_separation(
     harness: MemoryHarness,
     dataset: Dataset,
-    synonym_expected: Sequence[tuple[str, Optional[str]]],
+    synonym_expected: Sequence[tuple[str, Optional[Sequence[str]]]],
 ) -> Dict[str, Any]:
     """Measure how far apart related and unrelated queries actually score.
 
@@ -497,6 +505,10 @@ async def evaluate(dataset: Dataset, config, floor: float, workdir: Path) -> Dic
         "memories_after_ingest": [m.content for m in harness.memories()],
     }
 
+    # Simulate a process restart before running retrieval, verifying persistence.
+    harness.close()
+    harness = MemoryHarness(config, db_path, similarity_floor=floor)
+
     # -- recall --------------------------------------------------------
     synonym_scores = [
         await _score_question(harness, question, expected)
@@ -526,18 +538,19 @@ async def evaluate(dataset: Dataset, config, floor: float, workdir: Path) -> Dic
     for entry in dataset.corrections:
         old_needle = entry["old"]
         new_statement = entry["new"]
-        old_memory = harness.find_memory(old_needle)
-        if old_memory is None:
+        old_memories = [m for m in harness.memories() if old_needle in m.content]
+        if not old_memories:
             correction_results.append(
                 {"old": old_needle, "new": new_statement,
                  "ok": False, "detail": "original memory not found"}
             )
             continue
 
-        harness.store.correct_memory(old_memory.memory_id, new_statement)
-        # Re-embed the corrected text so retrieval sees the new fact.
-        vector = (await harness.embedding.embed([new_statement]))[0]
-        harness.store.store_embedding(old_memory.memory_id, vector)
+        for old_memory in old_memories:
+            new_memory_id = harness.store.correct_memory(old_memory.memory_id, new_statement)
+            # Re-embed the corrected text so retrieval sees the new fact.
+            vector = (await harness.embedding.embed([new_statement]))[0]
+            harness.store.store_embedding(new_memory_id, vector)
 
         results = await harness.recall(entry["question"])
         contents = [record.content for record in results]
@@ -562,19 +575,23 @@ async def evaluate(dataset: Dataset, config, floor: float, workdir: Path) -> Dic
     forget_results = []
     for entry in dataset.forgets:
         needle = entry["fact"]
-        memory = harness.find_memory(needle)
-        if memory is None:
+        memories = [m for m in harness.memories() if needle in m.content]
+        if not memories:
             forget_results.append(
                 {"fact": needle, "ok": False, "detail": "memory not found"}
             )
             continue
 
-        memory_id = memory.memory_id
-        outcome = harness.store.forget(memory_id)
-        if not outcome.get("ok", True):
+        failed_outcomes = []
+        for memory in memories:
+            outcome = harness.store.forget(memory.memory_id)
+            if not outcome.get("success", outcome.get("ok", True)):
+                failed_outcomes.append(outcome.get("reason"))
+
+        if failed_outcomes:
             forget_results.append(
                 {"fact": needle, "ok": False,
-                 "detail": f"forget required selection: {outcome.get('reason')}"}
+                 "detail": f"forget required selection: {'; '.join(failed_outcomes)}"}
             )
             continue
 
@@ -623,9 +640,16 @@ def _needle(fact: str) -> str:
     whole sentence would fail even when the fact was stored correctly. A short
     content-bearing span survives that rewrite.
     """
+    import re
     cleaned = fact.replace("，", " ").replace("。", " ").replace(",", " ").strip()
     parts = [part for part in cleaned.split() if len(part) >= 3]
-    return parts[0] if parts else fact[:6]
+    candidate = parts[0] if parts else fact[:6]
+    candidate = re.sub(
+        r"^(?:用户)?(?:我(?:的|们|对|有|是|在|用|怕|最|习惯|每周|住|练|手机|小学|讨厌|最近|明天|下个月)?)?",
+        "",
+        candidate,
+    ).strip()
+    return candidate if len(candidate) >= 2 else (parts[0] if parts else fact[:6])
 
 
 async def _check_multi_fact(harness: MemoryHarness, spec: Dict[str, Any]) -> Dict[str, Any]:

@@ -295,7 +295,13 @@ def _edit_similarity(left: str, right: str) -> float:
         previous = current
 
     longest = previous[-1]
-    return 2.0 * longest / (len(left) + len(right))
+    # Use max of symmetric Dice ratio and containment ratio against the shorter string (the clause).
+    # When an extraction adds context words (e.g. clause is '看到第三季了。' (7 chars) and
+    # target is '用户正在看的这部纪录片已看到第三季。' (18 chars)), the clause is almost entirely
+    # contained (6/7 matching chars), but symmetric ratio drops to 12/25 = 0.48.
+    ratio_sym = 2.0 * longest / (len(left) + len(right))
+    ratio_contain = longest / min(len(left), len(right))
+    return max(ratio_sym, ratio_contain)
 
 
 def _split_clauses(text: str) -> List[str]:
@@ -1710,8 +1716,13 @@ class MemoryService:
                 self._store.complete_task(task_id)
                 continue
 
+            user_message_ids = [
+                m.message_id
+                for m in messages
+                if m is not None and m.role == "user" and m.status != "deleted"
+            ]
             for fact in facts:
-                stored = await self._write_fact(fact, message_ids)
+                stored = await self._write_fact(fact, user_message_ids)
                 if stored:
                     written += 1
             self._store.complete_task(task_id)

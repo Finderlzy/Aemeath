@@ -21,9 +21,10 @@ def test_check_config_imports_upstream_from_repo_root():
         [sys.executable, str(SCRIPT), "--config", "config/acceptance/conf.acceptance.yaml"],
         cwd=ROOT_DIR,
         capture_output=True,
-        text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=120,
     )
-    output = result.stdout + result.stderr
+    output = (result.stdout or "") + (result.stderr or "")
     assert "No module named 'src'" not in output
     assert "Upstream package imports" in output

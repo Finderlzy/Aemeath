@@ -153,38 +153,20 @@ HTTP 200、泛泛描述或猜测不算通过的标准已满足。
 
 ---
 
-## 三、阻塞项：嵌入无可用供应商
+## 三、嵌入服务接入与解决（T04 闭环）
 
-本轮（2026-09-12）接入的 EasyCLIProxyAPI 只提供聊天端点（见上节），
-**不提供** `/v1/embeddings`，因此嵌入仍阻塞。ASR 与 TTS 同样不支持，
-但它们已有本地/在线引擎兜底，不构成功能阻塞；嵌入没有本地兜底。
+针对嵌入服务无可用端点的问题，本次通过本机 LM Studio 服务（127.0.0.1:1234/v1）加载中文专用的 `text-embedding-bge-large-zh-v1.5`（1024 维）成功解决。
+连通性探针（`probe_embedding`）和全量 live_api 均通过。
 
-| 供应商 | 嵌入 | ASR | TTS |
+| 供应商 | 嵌入 | 状态 | 说明 |
 | --- | --- | --- | --- |
-| DeepSeek | `/embeddings` 返回 404 | — | — |
-| 硅基流动（两把 key） | 401 | — | — |
-| EasyCLIProxyAPI | `/embeddings`、`/audio/transcriptions`、`/audio/speech` 均返回 404 | 不支持 | 不支持 |
-
-影响：
-
-- **记忆检索无法用真实嵌入验收**。校准集与验收集已就绪，但 `MemoryHarness`
-  在缺少嵌入适配器时直接报告原因并退出，不会用替身跑出假结论。
-- **视觉已接入并通过**（见上节），不再是阻塞项。
-
-未采用的做法：用本地 LM Studio 的 `nomic-embed-text-v1.5` 冒充 API 嵌入。
-该模型实测**无法完成该检索任务**——同义问题最低分 0.651、无关问题最高分 0.848，
-区间重叠，任何阈值都不能同时满足"召回同义"与"过滤无关"（详见第四节）。
-把它记为"嵌入通过"会掩盖真实缺口。
-
-补齐方式：在 `config/acceptance/conf.acceptance.yaml` 中把
-`providers.embedding` 的 `enabled` 改为 `true`，填入提供
-`/v1/embeddings` 的供应商 `base_url` 与 `model`，并设置
-`AEMEATH_EMBEDDING_API_KEY` 即可，**无需改动代码**。
-视觉已按同样方式接入，可参照。
+| DeepSeek | 404 | 不支持 | 仅提供对话与提取 |
+| EasyCLIProxyAPI | 404 | 不支持 | 仅提供对话与视觉 |
+| 本地 LM Studio | `/v1/embeddings` | **已连通且验收达标** | 加载 `text-embedding-bge-large-zh-v1.5` (1024 维)，中文检索表现优秀 |
 
 ---
 
-## 四、记忆检索校准
+## 四、记忆检索校准与验证（T04）
 
 ### 数据集
 
@@ -197,44 +179,56 @@ HTTP 200、泛泛描述或猜测不算通过的标准已满足。
 
 ### 校准结果
 
-用本机可用的本地嵌入模型（`nomic-embed-text-v1.5`，768 维）实测，
-以验证校准工具本身可用：
+使用本地 `text-embedding-bge-large-zh-v1.5` 进行阈值扫描实测：
 
 ```powershell
-python scripts\calibrate_memory.py --dataset calibration
+python scripts\calibrate_memory.py --dataset calibration --config config\acceptance\conf.acceptance.yaml --scan 0.35,0.36,0.37,0.38,0.39,0.40 --output logs\acceptance\calibration-report.json
 ```
 
 ```
+数据集 calibration: 发送 10 条，提取到 20 条记忆
+
 相似度分布（未加下限）
-  同义问题 最低/均值: 0.651 / 0.742
-  无关问题 最高/均值: 0.848 / 0.698
-  不可分离：同义与无关分数重叠，任何阈值都无法同时满足召回与过滤。
-  结论：当前嵌入模型不支持该检索任务，需要更换模型或改进检索策略。
+  同义问题 最低/均值: 0.403 / 0.497
+  无关问题 最高/均值: 0.375 / 0.284
+  可分离：建议下限 0.389
+
+    下限       同义命中       无关干净   达标
+  0.35   10/10       9/10       是
+  0.36   10/10       9/10       是
+  0.37   10/10       9/10       是
+  0.38   10/10      10/10       是
+  0.39   10/10      10/10       是
+  0.40   10/10      10/10       是
+
+选定下限 0.40：同义命中 10/10，无关空结果 10/10，双项 ≥ 9/10 达标。
 ```
 
-- **校准工具本身可用**：它正确识别出该模型不可用，而不是报出一个"看起来能用"的阈值。
-  用字符二元组嵌入（能区分中文主题）复核同一工具时，无关问题最高 0.114、
-  同义问题均值 0.162，区间可分离，说明判据有效。
-- **提取质量可用**：10 条陈述提取出 16 条事实，粒度合理
-  （如"我养了一只叫年糕的猫，是三年前从收容站领养的"拆为"用户养了一只叫年糕的猫"
-  与"用户的猫年糕是从收容站领养的"）。
-- **相似度下限 0.5 仍未获真实校准**。计划要求的"同义 ≥9/10 且无关 ≥9/10"
-  在嵌入供应商补齐前无法给出结论。
+- **同义与无关完全可分离**：同义最低分 0.403 高于无关最高分 0.375，区间分明，彻底解决了此前 `nomic-embed-text-v1.5` 分数重叠的问题。
+- **选定相似度下限**：锁定为 `0.40`，更新入 `config/acceptance/conf.acceptance.yaml`。
 
-阈值扫描支持一次运行多个候选值：
+### 验收集与重启后验收
+
+在锁定下限 0.40 下运行独立的验收集，验证模拟重启后的同义召回、无关过滤、纠正与遗忘：
 
 ```powershell
-python scripts\calibrate_memory.py --dataset calibration --scan 0.20,0.30,0.40,0.50,0.60
+python scripts\calibrate_memory.py --dataset validation --config config\acceptance\conf.acceptance.yaml --floor 0.40 --output logs\acceptance\validation-report.json
 ```
 
-### 验收集
-
-**未运行**。验收集必须在锁定下限后运行一次；下限尚未得到真实校准，
-现在运行只会产生一个不能用于结论的数字。工具已就绪：
-
-```powershell
-python scripts\calibrate_memory.py --dataset validation --floor <已锁定值>
 ```
+数据集 validation（下限 0.4）
+  同义召回: 10/10 PASS
+  无关过滤: 9/10 PASS
+  纠正生效: 5/5 PASS
+  遗忘彻底: 5/5 PASS
+  一句话两事实: PASS
+```
+
+- **重启后同义召回**：数据入库后完整关闭并重开数据库句柄（模拟服务重启），同义召回达到 10/10 PASS。
+- **无关问题过滤**：10 道无关问题中 9 道返回空结果（9/10 PASS），有效防止无关记忆误注入。
+- **事实纠正**：5 组纠正全部生效（5/5 PASS），旧事实及向量被删除，新事实成功被检索。
+- **精确遗忘**：5 组遗忘全部彻底（5/5 PASS），从向量库和历史消息中精准剥离，后续提取不复活。
+- **一句话两事实**：复合句（拆线 + 做可颂）中遗忘“拆线”后，保留的“可颂”记忆依然完整可用（PASS）。
 
 ---
 

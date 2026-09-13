@@ -181,7 +181,7 @@ character_config:
       recall_limit: 5
       # 检索相似度下限（0–1）。无关查询应返回空，而不是固定返回最像的几条。
       # 校准结果见 docs/acceptance.md 第三节；本值是校准后锁定的取值。
-      similarity_floor: 0.5
+      similarity_floor: 0.40
       # 后台提取任务的处理间隔（秒）
       extraction_interval_seconds: 5.0
     proactive:
@@ -200,19 +200,19 @@ character_config:
     # api_key_env 只写环境变量名，密钥本身不进配置文件。
     # 未配置的能力状态为 disabled；已配置但初始化失败为 error，不会静默降级。
     #
-    # 真实供应商可达性探测结果（2026-09-14）见 docs/acceptance.md：
+    # 真实供应商可达性探测结果见 docs/acceptance.md：
     #   conversation / extraction 使用 DeepSeek，已连通；
-    #   embedding / vision 在本机无可用供应商，保持 enabled: false —
-    #   取消注释并填入凭据即可启用，无需改代码。
+    #   vision 走 EasyCLIProxyAPI (gemini-3.8-flash-high)；
+    #   embedding 接入本机 LM Studio (text-embedding-bge-large-zh-v1.5, 1024 维)。
     providers:
       embedding:
-        enabled: false
+        enabled: true
         provider: 'openai_compatible'
-        base_url: ''
-        model: ''
+        base_url: 'http://127.0.0.1:1234/v1'
+        model: 'text-embedding-bge-large-zh-v1.5'
         api_key_env: 'AEMEATH_EMBEDDING_API_KEY'
         timeout_seconds: 30
-        dimensions: 0
+        dimensions: 1024
       extraction:
         enabled: true
         provider: 'openai_compatible'

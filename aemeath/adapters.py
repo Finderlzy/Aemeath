@@ -31,6 +31,7 @@ __all__ = [
     "FakeExtractionAdapter",
     "OpenAICompatibleExtraction",
     "OpenAICompatibleVision",
+    "GPTSoVITSAdapter",
     "AdapterFactory",
     "RetryPolicy",
     "cosine_similarity",
@@ -105,7 +106,7 @@ TLS_INSECURE_ENV = "AEMEATH_TLS_INSECURE"
 _tls_warning_emitted = False
 
 
-def http_client(timeout: float):
+def http_client(timeout: float, transport: Optional[Any] = None):
     """Build an HTTP client for provider calls, applying the TLS policy.
 
     Centralised so the verification decision is made in exactly one place
@@ -113,6 +114,7 @@ def http_client(timeout: float):
 
     Args:
         timeout: Request timeout in seconds.
+        transport: Optional ``httpx`` transport override (tests only).
 
     Returns:
         A configured ``httpx.AsyncClient``.
@@ -129,7 +131,7 @@ def http_client(timeout: float):
             "({}=1). Use only against a trusted local proxy.",
             TLS_INSECURE_ENV,
         )
-    return httpx.AsyncClient(timeout=timeout, verify=not insecure)
+    return httpx.AsyncClient(timeout=timeout, verify=not insecure, transport=transport)
 
 
 class EmbeddingAdapter:
@@ -473,6 +475,149 @@ class OpenAICompatibleVision:
             raise ModelError(f"unexpected vision response shape: {exc}") from exc
 
 
+class GPTSoVITSAdapter:
+    """TTS adapter for a local GPT-SoVITS api_v2 server.
+
+    The runtime synthesis path is upstream's own ``gpt_sovits_tts`` engine;
+    this adapter exists so the standalone live probe asks the exact same
+    question the engine will (``GET /tts`` with the api_v2 parameters).
+
+    ``streaming_mode`` must be a bool or an int 0–3 on the wire. The upstream
+    engine's default is the misspelled string ``"ture"``, which api_v2
+    rejects with a 422 before any synthesis, so the adapter normalises valid
+    values itself and refuses invalid ones at construction time.
+    """
+
+    def __init__(
+        self,
+        api_url: str,
+        text_lang: str,
+        ref_audio_path: str,
+        prompt_lang: str,
+        prompt_text: str,
+        text_split_method: str = "cut5",
+        batch_size: str = "1",
+        media_type: str = "wav",
+        streaming_mode: object = False,
+        timeout: float = 120.0,
+    ) -> None:
+        """Store the api_v2 request parameters.
+
+        Args:
+            api_url: Full TTS endpoint, e.g. ``http://127.0.0.1:9880/tts``.
+            text_lang: Language of the text to synthesise.
+            ref_audio_path: Reference audio defining the character's voice.
+            prompt_lang: Language of ``prompt_text``.
+            prompt_text: Transcript matching the reference audio.
+            text_split_method: api_v2 text splitting strategy.
+            batch_size: api_v2 inference batch size.
+            media_type: Response container (``wav``, ``ogg``, ``aac``, ``raw``).
+            streaming_mode: Bool or int 0–3; strings are normalised, invalid
+                values raise :class:`ValueError`.
+            timeout: Request timeout in seconds.
+        """
+        self.api_url = api_url
+        self.text_lang = text_lang
+        self.ref_audio_path = ref_audio_path
+        self.prompt_lang = prompt_lang
+        self.prompt_text = prompt_text
+        self.text_split_method = text_split_method
+        self.batch_size = batch_size
+        self.media_type = media_type
+        self.streaming_mode = self._normalise_streaming_mode(streaming_mode)
+        self.timeout = timeout
+        #: Injection point for tests; production builds a fresh client.
+        self._transport = None
+
+    @staticmethod
+    def _normalise_streaming_mode(raw: object) -> object:
+        """Coerce a configured streaming_mode to a wire-legal value.
+
+        Args:
+            raw: The value as it came from configuration.
+
+        Returns:
+            ``True``/``False`` or an ``int`` in 0–3.
+
+        Raises:
+            ValueError: The value cannot be sent to api_v2 at all (this is how
+                the upstream engine's default ``"ture"`` is caught).
+        """
+        if isinstance(raw, bool):
+            return raw
+        if isinstance(raw, int):
+            if 0 <= raw <= 3:
+                return raw
+        elif isinstance(raw, str):
+            lowered = raw.strip().lower()
+            if lowered == "true":
+                return True
+            if lowered == "false":
+                return False
+            if lowered.isdigit() and 0 <= int(lowered) <= 3:
+                return int(lowered)
+        raise ValueError(
+            f"streaming_mode must be true/false or an int in 0-3, got {raw!r}"
+        )
+
+    @classmethod
+    def _create_for_test(cls, **kwargs) -> "GPTSoVITSAdapter":
+        """Build an adapter with only the named fields set."""
+        defaults: Dict[str, Any] = {
+            "api_url": "http://127.0.0.1:9880/tts",
+            "text_lang": "zh",
+            "ref_audio_path": "ref.wav",
+            "prompt_lang": "zh",
+            "prompt_text": "",
+        }
+        defaults.update(kwargs)
+        return cls(**defaults)
+
+    async def synthesize(self, text: str) -> bytes:
+        """Synthesise one utterance through api_v2 ``GET /tts``.
+
+        Args:
+            text: The text to voice. Bracketed expressions are stripped the
+                same way the upstream engine strips them.
+
+        Returns:
+            The raw audio bytes in ``media_type`` form.
+
+        Raises:
+            ModelError: The server is unreachable or answered an error.
+        """
+        cleaned = re.sub(r"\[.*?\]", "", text)
+        params = {
+            "text": cleaned,
+            "text_lang": self.text_lang,
+            "ref_audio_path": self.ref_audio_path,
+            "prompt_lang": self.prompt_lang,
+            "prompt_text": self.prompt_text,
+            "text_split_method": self.text_split_method,
+            "batch_size": self.batch_size,
+            "media_type": self.media_type,
+            "streaming_mode": self.streaming_mode,
+        }
+
+        try:
+            async with http_client(self.timeout, transport=self._transport) as client:
+                response = await client.get(self.api_url, params=params)
+        except Exception as exc:
+            raise ModelError(f"gpt-sovits request failed: {exc}") from exc
+
+        if response.status_code in (400, 422):
+            # api_v2 rejects parameter mistakes with a JSON explanation.
+            raise ModelError(
+                f"gpt-sovits rejected the request "
+                f"(HTTP {response.status_code}): {response.text[:200]}"
+            )
+        if response.status_code >= 400:
+            raise ModelError(
+                f"gpt-sovits returned HTTP {response.status_code}"
+            )
+        return response.content
+
+
 class AdapterFactory:
     """Builds model adapters from configuration.
 
@@ -622,6 +767,69 @@ class AdapterFactory:
             configured=True,
             enabled=True,
             detail=f"{provider.provider}:{provider.model}",
+        )
+
+    def build_tts(self):
+        """Build the live-probe TTS adapter and report its state.
+
+        The runtime synthesis engine is built by upstream's ``TTSFactory``
+        from the same config; this adapter exists so ``probe_tts`` asks the
+        server the same question the engine will. ``local`` backends are the
+        first-release placeholders and are reported as not configured.
+        """
+        speech = self._config.speech
+        if speech.tts_backend == "local":
+            return None, self._status(
+                "tts",
+                configured=False,
+                enabled=False,
+                detail=(
+                    "tts backend is local (first-release default such as "
+                    "edge-tts); no formal TTS engine is selected"
+                ),
+            )
+
+        gpt_sovits = speech.gpt_sovits
+        if speech.tts_backend == "gpt_sovits_tts" and gpt_sovits:
+            try:
+                adapter = GPTSoVITSAdapter(
+                    api_url=str(gpt_sovits.get("api_url") or ""),
+                    text_lang=str(gpt_sovits.get("text_lang") or "zh"),
+                    ref_audio_path=str(gpt_sovits.get("ref_audio_path") or ""),
+                    prompt_lang=str(gpt_sovits.get("prompt_lang") or "zh"),
+                    prompt_text=str(gpt_sovits.get("prompt_text") or ""),
+                    text_split_method=str(
+                        gpt_sovits.get("text_split_method") or "cut5"
+                    ),
+                    batch_size=str(gpt_sovits.get("batch_size") or "1"),
+                    media_type=str(gpt_sovits.get("media_type") or "wav"),
+                    streaming_mode=gpt_sovits.get("streaming_mode", False),
+                )
+            except ValueError as exc:
+                # The upstream engine's own default ("ture") is exactly this
+                # failure; surface it as a configuration error, not a crash.
+                return None, self._status(
+                    "tts",
+                    configured=True,
+                    enabled=False,
+                    error=str(exc),
+                )
+            return adapter, self._status(
+                "tts",
+                configured=True,
+                enabled=True,
+                detail="gpt_sovits: local api_v2 server at "
+                f"{adapter.api_url}",
+            )
+
+        return None, self._status(
+            "tts",
+            configured=False,
+            enabled=False,
+            detail=(
+                f"tts backend '{speech.tts_backend}' has no Aemeath probe "
+                "adapter; probe it through the upstream engine or add one"
+            ),
         )
 
     def build_capture(self):

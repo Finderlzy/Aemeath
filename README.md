@@ -1,5 +1,7 @@
 # Aemeath (爱弥斯)
 
+首个正式源码版本：**v1.0.0**。下载与已知限制见 [GitHub Release](https://github.com/Finderlzy/Aemeath/releases/tag/v1.0.0)，验收证据见 [交付记录](docs/delivery.md)。版本字段以 `aemeath/__init__.py` 的 `__version__` 为准，发布标签使用 `vMAJOR.MINOR.PATCH`；后续按 SemVer 维护首期接口与配置兼容性。
+
 Windows 桌面 AI 伙伴，角色原型为《鸣潮》爱弥斯。首期以 **Open-LLM-VTuber v1.2.1** 为运行底座，通过有序补丁与统一桥接层（`AemeathBridge`）深度扩展，支持本地事实与经历记忆（SQLite + 向量检索）、屏幕观察理解、主动交流节奏调度、情境状态感知（课堂静音）、本地 SenseVoice 语音识别与本地 GPT-SoVITS 语音合成。
 
 ---
@@ -50,6 +52,7 @@ Windows 桌面 AI 伙伴，角色原型为《鸣潮》爱弥斯。首期以 **Op
 # 1) 克隆 Aemeath 仓库
 git clone https://github.com/Finderlzy/Aemeath.git E:\WorkSpace\Aemeath
 cd E:\WorkSpace\Aemeath
+git checkout v1.0.0
 
 # 2) 拉取上游后端底座与前端子模块（固定 v1.2.1 / commit 3afa410）
 git -c http.proxy=http://127.0.0.1:7897 clone --depth 1 --branch v1.2.1 `

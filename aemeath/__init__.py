@@ -6,4 +6,4 @@ audio transport, VAD, ASR and TTS wiring; this package owns character context,
 situation state, local memory, screen awareness and proactive scheduling.
 """
 
-__version__ = "0.1.0"
+__version__ = "1.0.0"

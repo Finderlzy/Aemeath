@@ -20,10 +20,11 @@
 > 修复前回归基线＝`71376f0` 上 **244 passed, 7 deselected**。
 > 该基线只记录修复前事实，**不宣布任何功能通过**。
 
-> **当前回归基线（2026-09-13，GPT-SoVITS 接入后）：`main` 288 → 分支 330 passed, 7 deselected。**
-> 增量 42 项＝13 项真实上游引擎（`test_gpt_sovits_engine.py`）+ 29 项适配器
-> （`test_gpt_sovits_tts.py`），见 [验收记录第十节](acceptance.md#十当前回归基线gpt-sovits-接入后2026-09-13)。
-> 该项只记录测试规模，**不代表 T05 验收通过**。
+> **当前回归基线（2026-09-13，T03 完成后）：`main` 330 → 分支 347 passed, 7 deselected。**
+> T03 增量 17 项，全部在 `tests/integration/test_proactive_screen_driven.py`，
+> 经真实 runtime 定时器与上游主动生成器入口驱动，见
+> [验收记录第十一节](acceptance.md#十一t03-屏幕驱动主动对话2026-09-13)。
+> 该项只记录测试规模，**不代表 T03 已完成真机验收**；T03 的完成证据同样只覆盖隔离窗口。
 
 ## 需求覆盖
 
@@ -32,8 +33,8 @@
 | R01 对话与桌面 | 浏览器 10 轮文字已有通过记录 | 桌面实际入口、麦克风、GPT-SoVITS 合成与可听主动输出 | [T01](https://github.com/Finderlzy/Aemeath/issues/2)、[T05](https://github.com/Finderlzy/Aemeath/issues/6)、[T07](https://github.com/Finderlzy/Aemeath/issues/8) |
 | R02 课堂 | 状态、输出闸门与隔离测试已实现 | 播放中切换、主动音频、重启保持真人验证 | [T01](https://github.com/Finderlzy/Aemeath/issues/2)、[T05](https://github.com/Finderlzy/Aemeath/issues/6) |
 | R03 本地记忆 | SQLite、提取与历史持久化有证据 | 可用嵌入、中文检索质量、重启后同义召回 | [T04](https://github.com/Finderlzy/Aemeath/issues/5) |
-| R04 屏幕 | 手动捕获与视觉已有通过记录 | 迟到缓存、关闭后的请求、锁屏与窗口不可用 | [T02](https://github.com/Finderlzy/Aemeath/issues/3)、[T03](https://github.com/Finderlzy/Aemeath/issues/4)、[T06](https://github.com/Finderlzy/Aemeath/issues/7) |
-| R05 主动交流 | 定时器与资格规则已实现 | 空音频、重复计数、屏幕上下文、生成中状态变化与恢复 | [T01](https://github.com/Finderlzy/Aemeath/issues/2)、[T03](https://github.com/Finderlzy/Aemeath/issues/4)、[T06](https://github.com/Finderlzy/Aemeath/issues/7) |
+| R04 屏幕 | 手动捕获与视觉已有通过记录 | 迟到缓存、关闭后的请求、锁屏与窗口不可用 | [T02](https://github.com/Finderlzy/Aemeath/issues/3)、[T06](https://github.com/Finderlzy/Aemeath/issues/7) |
+| R05 主动交流 | 定时器与资格规则已实现 | 空音频、重复计数、屏幕上下文、生成中状态变化与恢复 | [T01](https://github.com/Finderlzy/Aemeath/issues/2)、[T06](https://github.com/Finderlzy/Aemeath/issues/7) |
 | R06 本地边界 | SQLite、本地索引与忽略规则 | 各项接入和复现时持续核查，不引入云端记忆 | [T02](https://github.com/Finderlzy/Aemeath/issues/3)、[T04](https://github.com/Finderlzy/Aemeath/issues/5)、[T07](https://github.com/Finderlzy/Aemeath/issues/8) |
 | E01 建议能力 | 打断、纠正和精确遗忘已有隔离覆盖 | 真实打断、真实嵌入下纠正遗忘 | [T04](https://github.com/Finderlzy/Aemeath/issues/5)、[T05](https://github.com/Finderlzy/Aemeath/issues/6) |
 

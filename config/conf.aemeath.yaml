@@ -112,11 +112,35 @@ character_config:
       lang: 'zh'
 
   tts_config:
-    # 首期默认 edge_tts：中文可用、无需密钥，先验证播放与取消链路。
+    # 正式语音方案为本地 GPT-SoVITS（见 docs/requirements.md 的 TTS 范围调整）。
+    # 切到它之前需先启动 GPT-SoVITS api_v2 服务，否则 TTS 不可用。
+    # 先用现成声音模型与参考音频跑通接入；爱弥斯专属音色另行确定。
     tts_model: 'edge_tts'
 
     edge_tts:
       voice: zh-CN-XiaoxiaoNeural
+
+    # 本地 GPT-SoVITS（api_v2，默认 http://127.0.0.1:9880/tts）。
+    # 将 tts_model 改为 'gpt_sovits_tts' 即启用。
+    #
+    # ref_audio_path 与 prompt_text 定义音色：参考音频放本机，
+    # 不进源码版本管理；prompt_text 必须是该音频的真实转写，
+    # 写错会让音色与韵律明显变差。
+    #
+    # streaming_mode 在 api_v2 上必须是 true/false 或 0-3 的整数，
+    # 但上游 GPTSoVITSConfig 把它声明为 str，写 YAML 布尔值会直接校验失败，
+    # 因此这里写成字符串。上游引擎默认值是拼错的 'ture'，api_v2 会返回 422，
+    # 所以必须显式覆盖；改成 '2' 或 '3' 可换取更快的首段响应。
+    gpt_sovits:
+      api_url: 'http://127.0.0.1:9880/tts'
+      text_lang: 'zh'
+      ref_audio_path: '${AEMEATH_GPT_SOVITS_REF_AUDIO}'
+      prompt_lang: 'zh'
+      prompt_text: '${AEMEATH_GPT_SOVITS_PROMPT_TEXT}'
+      text_split_method: 'cut5'
+      batch_size: '1'
+      media_type: 'wav'
+      streaming_mode: 'false'
 
     # 备用：换成自带音色的 API TTS 时，从环境变量注入密钥
     siliconflow_tts:

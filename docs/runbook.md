@@ -283,11 +283,17 @@ cd E:\WorkSpace\Aemeath
 - `probe_protocol.py` 全部通过：协议协商 `accepted=True`；
   课堂切换帧序为 `aemeath-state` → `aemeath-clear-audio` → `full-text`
 - 真实数据库 v1→v2 迁移成功，数据保留
-- 干净 `v1.2.1` 检出按序套用 0001→0003 成功，7 个文件与工作副本逐字节一致
+- 干净 `v1.2.1` 检出按序套用 0001→0004 成功，8 个文件与工作副本逐字节一致
+  （T01 重新核对；补丁 0004 见 [补丁清单](patches/README.md)）
 - 客户端 `npm run build:web` 成功，产物与部署文件 SHA256 相同
-- `pytest` **244 项通过**（161 模块 + 83 生产入口，含 12 项真实链路回归；7 项 `live_api` 默认排除）。
-  2026-09-13 在基线 `71376f0` 复跑确认，见 [验收记录第九节](acceptance.md#九t00-证据复核与回归基线2026-09-13)。
+- `pytest` **276 项通过**（161 模块 + 115 生产入口；7 项 `live_api` 默认排除）。
+  其中 244 项为 `71376f0` 基线（2026-09-13 复跑确认，
+  见 [验收记录第九节](acceptance.md#九t00-证据复核与回归基线2026-09-13)），
+  T01 新增 32 项主动语音、送达计数、TTS 引擎归属与 `end_turn` 顺序回归，见
+  `tests/integration/test_proactive_voice.py`。
   此处原记 224 项（160 + 64），为补齐真实链路回归之前的旧数字，已更正。
+- 主动输出经真实上游生成器入口（`ServiceContext._install_aemeath_proactive_generator()`）
+  产生**非空且可解码**的音频帧；课堂模式下不合成、不播放（T01）
 - 真实服务启动后后台任务确实运行（日志 `Aemeath background tasks started (2)`），
   主动调度器可在无客户端信号时自行发起一轮
 

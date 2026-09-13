@@ -125,7 +125,8 @@ character_config.agent_config.conversation_agent_choice
 
 ## 验证方式
 
-历史记录称补丁已验证可复现（原记载 2026-09-14，日期待复核；2026-09-12 本轮未重新执行，下次按实施计划 T07 核对）：
+历史记录称补丁已验证可复现（原记载 2026-09-14，经 [T00 复核](https://github.com/Finderlzy/Aemeath/issues/1)
+判定为**笔误，实际执行于 2026-09-12**；该次复核未重跑补丁验证，下次按实施计划 T07 核对）：
 
 - 按序 `git apply --check` 四个补丁对干净 `v1.2.1`（commit `3afa410`）全部成功；
 - 套用后文件与工作副本**逐字节一致**。

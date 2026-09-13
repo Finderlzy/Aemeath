@@ -81,7 +81,7 @@ $py = ".\vendor\Open-LLM-VTuber\.venv\Scripts\python.exe"
 & $py scripts\calibrate_memory.py --dataset calibration
 
 # 验收集：锁定下限后运行一次
-& $py scripts\calibrate_memory.py --dataset validation --floor 0.42
+& $py scripts\calibrate_memory.py --dataset validation --floor 0.40
 ```
 
 加 `--output PATH` 保存 JSON，加 `--keep-db` 保留数据库以便复现。

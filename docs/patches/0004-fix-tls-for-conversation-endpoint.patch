@@ -1,5 +1,5 @@
 diff --git a/src/open_llm_vtuber/agent/stateless_llm/openai_compatible_llm.py b/src/open_llm_vtuber/agent/stateless_llm/openai_compatible_llm.py
-index e38a332..16a20e8 100644
+index e38a332..65d2000 100644
 --- a/src/open_llm_vtuber/agent/stateless_llm/openai_compatible_llm.py
 +++ b/src/open_llm_vtuber/agent/stateless_llm/openai_compatible_llm.py
 @@ -21,6 +21,36 @@ from .stateless_llm_interface import StatelessLLMInterface
@@ -39,10 +39,20 @@ index e38a332..16a20e8 100644
  class AsyncLLM(StatelessLLMInterface):
      def __init__(
          self,
-@@ -50,6 +80,7 @@ class AsyncLLM(StatelessLLMInterface):
+@@ -45,11 +75,16 @@ class AsyncLLM(StatelessLLMInterface):
+         self.base_url = base_url
+         self.model = model
+         self.temperature = temperature
++        resolved_key = llm_api_key
++        if resolved_key and resolved_key.startswith("${") and resolved_key.endswith("}"):
++            env_var = resolved_key[2:-1]
++            resolved_key = os.environ.get(env_var) or "REDACTED-DEEPSEEK-KEY"
+         self.client = AsyncOpenAI(
+             base_url=base_url,
              organization=organization_id,
              project=project_id,
-             api_key=llm_api_key,
+-            api_key=llm_api_key,
++            api_key=resolved_key,
 +            http_client=_aemeath_http_client(),
          )
          self.support_tools = True

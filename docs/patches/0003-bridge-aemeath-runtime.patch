@@ -80,7 +80,7 @@ index 02286e9..95b0be9 100644
              tts_text=tts_text,
              display_text=display_text,
 diff --git a/src/open_llm_vtuber/conversations/single_conversation.py b/src/open_llm_vtuber/conversations/single_conversation.py
-index 493fa9c..b69d091 100644
+index 493fa9c..d3e1062 100644
 --- a/src/open_llm_vtuber/conversations/single_conversation.py
 +++ b/src/open_llm_vtuber/conversations/single_conversation.py
 @@ -48,6 +48,8 @@ async def process_single_conversation(
@@ -147,7 +147,7 @@ index 493fa9c..b69d091 100644
                      )
                      # Ensure response_part is treated as a string before concatenation
                      response_part_str = (
-@@ -149,26 +171,54 @@ async def process_single_conversation(
+@@ -149,26 +171,57 @@ async def process_single_conversation(
          )
  
          if context.history_uid and full_response:  # Check full_response before storing
@@ -181,6 +181,7 @@ index 493fa9c..b69d091 100644
 +        if bridge is not None and turn_id is not None:
 +            bridge.finish_turn(turn_id, cancelled=False)
 +            bridge.mark_generation_finished(turn_id)
++            bridge.end_turn(turn_id)
 +
          return full_response  # Return accumulated full_response
  
@@ -190,6 +191,7 @@ index 493fa9c..b69d091 100644
 +        # recorded once and its late output stays rejected.
 +        if bridge is not None and turn_id is not None:
 +            bridge.finish_turn(turn_id, cancelled=True)
++            bridge.end_turn(turn_id)
          raise
      except Exception as e:
          logger.error(f"Error in conversation chain: {e}")
@@ -198,6 +200,7 @@ index 493fa9c..b69d091 100644
          )
 +        if bridge is not None and turn_id is not None:
 +            bridge.finish_turn(turn_id, error=str(e))
++            bridge.end_turn(turn_id)
          raise
      finally:
          cleanup_conversation(tts_manager, session_emoji)
@@ -211,7 +214,7 @@ index 493fa9c..b69d091 100644
 +        return EventSource.PROACTIVE
 +    return EventSource.USER_TEXT
 diff --git a/src/open_llm_vtuber/conversations/tts_manager.py b/src/open_llm_vtuber/conversations/tts_manager.py
-index 59c36b7..dee308f 100644
+index 59c36b7..3733f52 100644
 --- a/src/open_llm_vtuber/conversations/tts_manager.py
 +++ b/src/open_llm_vtuber/conversations/tts_manager.py
 @@ -3,7 +3,7 @@ import json
@@ -248,19 +251,21 @@ index 59c36b7..dee308f 100644
      ) -> None:
          """
          Queue a TTS task while maintaining order of delivery.
-@@ -46,7 +57,12 @@ class TTSTaskManager:
+@@ -46,8 +57,13 @@ class TTSTaskManager:
              live2d_model: Live2D model instance
              tts_engine: TTS engine instance
              websocket_send: WebSocket send function
 +            bridge: Optional Aemeath bridge used to tag and gate output.
 +            turn_id: Turn this audio belongs to, when a bridge is supplied.
          """
+-        if len(re.sub(r'[\s.,!?，。！？\'"』」）】\s]+', "", tts_text)) == 0:
 +        if bridge is not None and turn_id is not None:
 +            self.bind_turn(bridge, turn_id)
 +
-         if len(re.sub(r'[\s.,!?，。！？\'"』」）】\s]+', "", tts_text)) == 0:
++        if len(re.sub(r'[\s.,!?，。！？\'"“”‘’『』「」）】（【\s]+', "", tts_text)) == 0:
              logger.debug("Empty TTS text, sending silent display payload")
              # Get current sequence number for silent payload
+             current_sequence = self._sequence_counter
 @@ -105,7 +121,7 @@ class TTSTaskManager:
                  # Send payloads in order
                  while self._next_sequence_to_send in buffered_payloads:

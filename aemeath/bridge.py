@@ -209,6 +209,7 @@ class AemeathBridge:
             # Cancel whatever the old connection was doing; its sender is now
             # detached so late output is dropped rather than delivered twice.
             self._coordinator.interrupt()
+            self._invalidate_pending_proactive("client replaced by new connection")
 
         logger.info(
             "Client attached: uid={} generation={} protocol={} full_client={}",
@@ -647,6 +648,9 @@ class AemeathBridge:
         if generate is None:
             logger.debug("Proactive skipped: no generator installed yet.")
             return None
+
+        if self._screen is not None:
+            self._coordinator.screen_locked = self._screen.is_locked()
 
         # Ask first, look second: an ineligible attempt costs no capture and no
         # vision call. The coordinator re-checks everything again below.
@@ -1105,6 +1109,10 @@ class AemeathBridge:
         """
         if self._metrics is not None:
             self._metrics.mark_generation_finished(turn_id)
+
+    def end_turn(self, turn_id: str) -> None:
+        """End an active turn in the coordinator."""
+        self._coordinator.end_turn(TurnId(turn_id))
 
     async def import_legacy_history(self) -> Dict[str, Any]:
         """Run the explicit, idempotent import of upstream JSON history.

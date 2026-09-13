@@ -471,6 +471,10 @@ class EventCoordinator:
             logger.info("Proactive candidate discarded: user became active.")
             self.end_turn(turn.turn_id)
             return None
+        if self.screen_locked:
+            logger.info("Proactive candidate discarded: session locked.")
+            self.end_turn(turn.turn_id)
+            return None
         if not self.situation.proactive_enabled:
             logger.info("Proactive candidate discarded: reactive switch turned off.")
             self.end_turn(turn.turn_id)

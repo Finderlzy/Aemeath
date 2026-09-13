@@ -220,6 +220,10 @@ class ScreenObserver:
         """Whether observation is currently permitted."""
         return self._enabled
 
+    def is_locked(self) -> bool:
+        """Whether the screen/session is currently locked."""
+        return self._backend.is_locked()
+
     def set_enabled(self, enabled: bool) -> None:
         """Enable or disable observation, invalidating in-flight work.
 

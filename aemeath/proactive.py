@@ -149,6 +149,13 @@ class ProactiveScheduler:
         if generation_active:
             return ProactiveDecision.deny("a reply is in progress")
 
+        if is_startup:
+            if not self.startup_greeting_enabled:
+                return ProactiveDecision.deny("startup greeting disabled")
+            if self._greeted:
+                return ProactiveDecision.deny("already greeted")
+            return ProactiveDecision.allow("startup greeting")
+
         if self._last_proactive_at is not None:
             elapsed = current - self._last_proactive_at
             if elapsed < self.cooldown_seconds:
@@ -159,13 +166,6 @@ class ProactiveScheduler:
         # passed; checked after the cooldown so the nearer reason is reported.
         if self._awaiting_response:
             return ProactiveDecision.deny("previous proactive message unanswered")
-
-        if is_startup:
-            if not self.startup_greeting_enabled:
-                return ProactiveDecision.deny("startup greeting disabled")
-            if self._greeted:
-                return ProactiveDecision.deny("already greeted")
-            return ProactiveDecision.allow("startup greeting")
 
         self._prune(current)
         if len(self._history) >= self.max_per_hour:

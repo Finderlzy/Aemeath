@@ -61,7 +61,7 @@ T06 依赖 T03，其语音分支依赖 T05；T07 依赖 T00、T04、T05、T06。
 | T03 接通屏幕驱动的自动主动对话 | [#4](https://github.com/Finderlzy/Aemeath/issues/4) | T01、T02 |
 | T04 接入可用嵌入服务并验收真实长期记忆 | [#5](https://github.com/Finderlzy/Aemeath/issues/5) | 外部依赖：可用嵌入供应商 |
 | T05 验收真实语音、打断与课堂静音 | [#6](https://github.com/Finderlzy/Aemeath/issues/6) | T01；本地 SenseVoice、本地 GPT-SoVITS 服务与音频设备 |
-| T06 验收主动交流节奏与失败恢复 | [#7](https://github.com/Finderlzy/Aemeath/issues/7) | T03；语音分支依赖 T05 |
+| T06 验收主动交流节奏与失败恢复 | [#7](https://github.com/Finderlzy/Aemeath/issues/7) | T03；语音分支依赖 T05；**已闭环** |
 | T07 完成首期可复现交付与持续试用验收 | [#8](https://github.com/Finderlzy/Aemeath/issues/8) | T00、T04、T05、T06 |
 
 T01 建议执行顺序：先从真实上游主动生成器入口建立失败回归 → 统一输出／轮次与回执语义 → 接入 TTS → 核对上游副本与补丁 → 验证普通回复及课堂分支不回退。

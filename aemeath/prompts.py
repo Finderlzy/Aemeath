@@ -169,9 +169,16 @@ def build_user_prompt(
 
     if has_screen_image:
         parts.append(_SCREEN_RULE_PRESENT)
-    elif screen_summary is not None:
-        # A summary without the image attached: this is the proactive case,
-        # where nothing was sent to the client and only the description exists.
+    elif screen_summary is not None and event is EventSource.PROACTIVE:
+        # A summary without the image attached, and only on the *proactive*
+        # path: there the model has no user message and nothing was sent to the
+        # client, so the description is the only thing it can speak about.
+        #
+        # An ordinary user turn keeps its existing behaviour. A user turn that
+        # arrived with an image already has the image itself, and one that did
+        # not must not silently acquire a screen summary it was never given —
+        # widening that would change how every reply is prompted, which is not
+        # what the screen-driven proactive task covers.
         parts.append(_format_screen(screen_summary))
     elif event is not EventSource.PROACTIVE:
         parts.append(_SCREEN_RULE_ABSENT)

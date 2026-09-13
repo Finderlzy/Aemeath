@@ -89,6 +89,7 @@ class AemeathAgent(AgentInterface):
         situation=None,
         memory=None,
         config=None,
+        screen_summary_provider: Optional[Callable[[], Any]] = None,
     ) -> None:
         """Initialise the agent.
 
@@ -104,6 +105,9 @@ class AemeathAgent(AgentInterface):
                 it on every turn rather than being cached here.
             memory: Optional local memory store implementing the memory API.
             config: Optional resolved Aemeath configuration.
+            screen_summary_provider: Optional zero-argument callable returning
+                the currently usable screen observation. When omitted it is
+                resolved from the process runtime.
         """
         super().__init__()
         self._llm = llm
@@ -120,6 +124,15 @@ class AemeathAgent(AgentInterface):
         self._situation_manager = situation
         self._memory = memory
         self._config = config
+        #: Optional screen-summary provider. Held as a callable rather than as
+        #: the observation itself, because validity (switch, age, source
+        #: window) has to be decided at prompt-assembly time, not at wiring
+        #: time: the user can switch observation off while the model is
+        #: generating. The bridge owns that judgement.
+        self._screen_summary_provider: Optional[Callable[[], Any]] = None
+        if screen_summary_provider is None:
+            screen_summary_provider = self._resolve_screen_provider()
+        self._screen_summary_provider = screen_summary_provider
 
         # Conversation working set, mirroring upstream's short-term memory.
         self._memory_messages: List[Dict[str, Any]] = []
@@ -130,6 +143,58 @@ class AemeathAgent(AgentInterface):
         self._cancelled_turns: set[str] = set()
 
         logger.info("AemeathAgent initialised.")
+
+    @staticmethod
+    def _resolve_screen_provider() -> Optional[Callable[[], Any]]:
+        """Fall back to the process-wide runtime's screen provider.
+
+        This is only a safety net for agents constructed without an explicit
+        provider. The supported path is :meth:`set_screen_summary_provider`,
+        because the runtime is not necessarily registered as the module global
+        when the agent is built (``build_runtime`` returns a runtime without
+        claiming the singleton), and reading a *different* runtime here would
+        attach the agent to a screen observer nobody is driving.
+        """
+        try:
+            from .runtime import _runtime
+
+            if _runtime is None or _runtime.bridge is None:
+                return None
+            return _runtime.bridge.current_screen_summary
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("No screen summary provider available: {}", exc)
+            return None
+
+    def set_screen_summary_provider(self, provider: Optional[Callable[[], Any]]) -> None:
+        """Install the callable that reports the currently usable summary.
+
+        The provider returns a :class:`~aemeath.interfaces.ScreenObservation`
+        only when that observation is genuinely usable right now, and ``None``
+        otherwise. The agent never decides validity itself and never caches the
+        result: a cached summary would survive the user switching observation
+        off, which is exactly what the acceptance criteria forbid.
+
+        Args:
+            provider: Zero-argument callable, or ``None`` to disable screen
+                context for this agent.
+        """
+        self._screen_summary_provider = provider
+
+    def _usable_screen_summary(self):
+        """The screen observation this turn may cite, if any.
+
+        Returns:
+            A ``ScreenObservation``, or ``None`` when there is no usable one.
+            A provider failure is reported as "no summary" rather than being
+            allowed to break generation.
+        """
+        if self._screen_summary_provider is None:
+            return None
+        try:
+            return self._screen_summary_provider()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.error("Screen summary lookup failed; continuing without it: {}", exc)
+            return None
 
     # ------------------------------------------------------------------
     # Situation state
@@ -283,6 +348,13 @@ class AemeathAgent(AgentInterface):
         # every update replaces the object rather than mutating it.
         situation = self.situation
 
+        # Screen context is resolved here, at the same moment, for the same
+        # reason: a summary is only valid while observation is on and it has
+        # not aged out. This is the connection A04 was missing — the prompt
+        # previously had no way to learn what was on screen, so a proactive
+        # message could not refer to it.
+        screen_summary = self._usable_screen_summary()
+
         situational = build_user_prompt(
             event=source,
             user_text=user_text,
@@ -290,6 +362,7 @@ class AemeathAgent(AgentInterface):
             situation=situation,
             has_screen_image=has_image,
             memory_available=memory_available,
+            screen_summary=screen_summary,
         )
 
         system_prompt = build_system_prompt(

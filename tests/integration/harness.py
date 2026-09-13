@@ -238,6 +238,60 @@ def load_validated_config(path: Path):
     return validate_config(read_yaml(str(path)))
 
 
+def _install_runtime_singleton(runtime) -> None:
+    """Make ``runtime`` the one ``get_runtime()`` returns.
+
+    The single-instance rule is a production invariant: exactly one runtime per
+    process, so a reconnecting client cannot create a second character state.
+    The harness builds its runtime directly (to inject test adapters), which
+    would otherwise leave the singleton unset and let ``AgentFactory`` silently
+    construct a second one. Setting it here keeps the harness on the same wiring
+    production uses.
+    """
+    from aemeath import runtime as runtime_module
+
+    runtime_module._runtime = runtime
+
+
+def _cancel_pending_runtime_starts(runtime) -> int:
+    """Cancel ``runtime.start()`` tasks the factory scheduled but has not run.
+
+    ``AgentFactory`` does ``loop.create_task(runtime.start())`` so that the
+    background workers start in the real server without blocking agent
+    construction. In a test, that task is still queued when ``create_agent``
+    returns, and it would fire during a later ``await`` — typically right after a
+    test called ``runtime.stop()``, re-creating the workers it just released.
+
+    Only pending tasks belonging to this runtime's ``start`` are touched, and the
+    cancellation is deliberate: the harness owns the runtime's lifecycle so a
+    test can drive it explicitly.
+
+    Returns:
+        How many tasks were cancelled.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        # No loop: nothing was scheduled, and nothing can be pending.
+        return 0
+
+    cancelled = 0
+    for task in asyncio.all_tasks(loop):
+        if task.done():
+            continue
+        coro = task.get_coro()
+        # ``AgentFactory`` schedules ``runtime.start()`` directly, so the
+        # coroutine is a bound-method coroutine whose ``__qualname__`` names the
+        # runtime class. Matching on the qualified name (rather than on
+        # ``__self__``, which a wrapped coroutine does not expose) is what makes
+        # this target only the factory's pending start.
+        qualname = getattr(coro, "__qualname__", "")
+        if qualname == f"{type(runtime).__name__}.start":
+            task.cancel()
+            cancelled += 1
+    return cancelled
+
+
 def aemeath_config_from_document(path: Path):
     """Resolve Aemeath's own settings from a written config file."""
     from aemeath.config import load_config
@@ -355,7 +409,7 @@ class IntegrationHarness:
 
 
 @pytest.fixture
-def make_harness(tmp_path: Path):
+async def make_harness(tmp_path: Path):
     """Factory building a harness wired through ``AgentFactory``.
 
     Returns a callable so individual tests can vary adapters (a failing or
@@ -411,6 +465,15 @@ def make_harness(tmp_path: Path):
             vision=vision,
             capture=capture,
         )
+        # Register this runtime as the process singleton *before* the factory
+        # runs. ``AgentFactory`` calls ``get_runtime()``, which builds a fresh
+        # runtime when the global is unset — that second runtime would have none
+        # of the adapters injected above (its vision and capture would be
+        # disabled), so the agent would be wired to a different, inert bridge
+        # than the one the test drives. Production has a single runtime by
+        # construction; the harness has to reproduce that or it is not testing
+        # the production wiring at all.
+        _install_runtime_singleton(runtime)
 
         if llm is None:
             from tests.doubles import FakeLLM
@@ -419,7 +482,7 @@ def make_harness(tmp_path: Path):
 
         # Build the agent through the real factory with the real config schema.
         # The factory calls ``get_runtime()``, which returns the runtime built
-        # above because the cache was just reset.
+        # above because it was just installed as the singleton.
         from src.open_llm_vtuber.agent.agent_factory import AgentFactory
 
         character_config = validated.character_config
@@ -434,6 +497,19 @@ def make_harness(tmp_path: Path):
         )
         # Swap in the test LLM while keeping the factory-built agent instance.
         agent._llm = llm
+
+        # The factory schedules ``runtime.start()`` as a task rather than
+        # awaiting it (it may be called outside a running loop). That task has
+        # not run yet at this point, and a test that calls ``start()`` and
+        # ``stop()`` itself would otherwise race it: the scheduled start lands
+        # after the test's ``stop()`` and re-creates the workers, so "tasks are
+        # released on shutdown" fails on a task nobody asked for.
+        #
+        # Cancelling the scheduled task here keeps the harness deterministic.
+        # Nothing about the production behaviour is removed: the factory still
+        # schedules the start, and ``test_factory_starts_runtime_background_tasks``
+        # still asserts that it does.
+        _cancel_pending_runtime_starts(runtime)
 
         websocket = FakeWebSocket()
         bridge = runtime.bridge
@@ -470,8 +546,20 @@ def make_harness(tmp_path: Path):
 
     yield _make
 
+    # Stop the runtime whose tasks this fixture may have started, then drop the
+    # singleton. Merely resetting the global would leave the previous runtime's
+    # ``memory`` and ``proactive`` tasks running on the event loop, and a later
+    # test that asserts "no tasks survive shutdown" would see them and fail on
+    # someone else's leftovers.
+    from aemeath import runtime as runtime_module
     from aemeath.runtime import reset_runtime
 
+    stale = runtime_module._runtime
+    if stale is not None and stale.tasks:
+        try:
+            await stale.stop()
+        except Exception:  # pragma: no cover - teardown is best effort
+            pass
     reset_runtime()
 
 

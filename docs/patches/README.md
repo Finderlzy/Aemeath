@@ -9,7 +9,7 @@
 
 | 顺序 | 补丁 | 文件 | 作用 |
 | --- | --- | --- | --- |
-| 1 | `0001-register-aemeath-agent.patch` | `src/open_llm_vtuber/agent/agent_factory.py` | 注册 `aemeath_agent` 分支，把情境管理器、记忆与桥接层接进 agent，并启动 runtime 后台任务 |
+| 1 | `0001-register-aemeath-agent.patch` | `src/open_llm_vtuber/agent/agent_factory.py` | 注册 `aemeath_agent` 分支，把情境管理器、记忆、屏幕摘要 provider 与桥接层接进 agent，并启动 runtime 后台任务 |
 | 2 | `0002-register-aemeath-agent-config.patch` | `src/open_llm_vtuber/config_manager/agent.py` | 允许 `aemeath_agent` 通过配置校验 |
 | 3 | `0003-bridge-aemeath-runtime.patch` | `service_context.py`、`websocket_handler.py`、`conversations/*` | 桥接层：协议扩展、轮次接入、输出闸门、迟到音频丢弃、SQLite 历史、主动调度与一次性问候 |
 | 4 | `0004-fix-tls-for-conversation-endpoint.patch` | `src/open_llm_vtuber/agent/stateless_llm/openai_compatible_llm.py` | 对话端点使用受 `AEMEATH_TLS_INSECURE` 控制的 HTTP 客户端 |
@@ -140,6 +140,21 @@ character_config.agent_config.conversation_agent_choice
 
 主动轮次 id 由桥接生成并**贯穿**文字、音频与显示回执：坐标相同的 id
 才能让客户端在打断后拒绝迟到音频，回执也才能对上同一条候选。
+
+### 屏幕摘要进入提示词（T03）
+
+`agent_factory.py` 创建 agent 时额外传入 `screen_summary_provider`：
+
+```python
+screen_summary_provider=runtime.bridge.current_screen_summary,
+```
+
+- 传的是**可调用对象**而不是摘要快照。用户可能在模型生成的任意长等待期间
+  关掉观察，有效性（开关、来源窗口、时效）必须在组装提示词那一刻重新判定。
+- 判定权在桥接，不在 agent：只有桥接同时知道情境开关、观察器开关、
+  来源窗口与摘要时间。agent 永远不自己判断有效性，也不缓存结果。
+- 未传该参数时 agent 退化为"没有屏幕上下文"，不会报错——上游独立运行或其他
+  agent 不受影响。
 
 ## 验证方式
 

@@ -149,18 +149,19 @@ class ScreenConfig:
 class SpeechConfig:
     """Which ASR and TTS backends are live.
 
-    The plan's acceptance criterion is that the *API* engines were really
-    selected, and that a local engine initialising successfully is not mistaken
-    for that. These values are read from the same upstream config the engines
-    are built from, so the probe can compare the intended backend against the
-    one actually constructed instead of assuming.
-
-    ``local`` means the first-release default (sherpa SenseVoice / edge-tts);
-    anything else names the API engine that must be live for acceptance.
+    ``local`` means the first-release defaults (sherpa SenseVoice / edge-tts
+    and the other offline engines); anything else names the formal engine.
+    ``gpt_sovits_tts`` is the confirmed fixed-character-voice choice: it runs
+    as a local HTTP server, but it is the *formal* backend rather than a
+    placeholder, so it is reported by name.
     """
 
     asr_backend: str = "local"
     tts_backend: str = "local"
+    #: The upstream ``gpt_sovits`` config block, read from the same validated
+    #: document the engine is built from. Kept as a plain dict because
+    #: upstream owns the schema; only the probe adapter consumes it.
+    gpt_sovits: Optional[Dict[str, Any]] = None
 
 
 @dataclass(frozen=True)
@@ -347,15 +348,37 @@ def _upstream_speech_backends(
     """
     character = (parsed.get("character_config") or {})
     asr_model = str((character.get("asr_config") or {}).get("asr_model") or "")
-    tts_model = str((character.get("tts_config") or {}).get("tts_model") or "")
+    tts_config = character.get("tts_config") or {}
+    tts_model = str(tts_config.get("tts_model") or "")
 
-    # Engines that run on this machine and need no provider.
+    # Engines that run on this machine and need no provider. ``gpt_sovits_tts``
+    # is NOT here: it is a local server, but it is the confirmed formal
+    # voice, so it must be reported by name rather than hidden behind
+    # the anonymous "local" placeholder.
     local_asr = {"sherpa_onnx_asr", "faster_whisper", "funasr"}
-    local_tts = {"edge_tts", "melo_tts", "gpt_sovits", "piper_tts", "bark_tts"}
+    local_tts = {"edge_tts", "melo_tts", "piper_tts", "bark_tts"}
 
     asr = "local" if (not asr_model or asr_model in local_asr) else asr_model
     tts = "local" if (not tts_model or tts_model in local_tts) else tts_model
     return asr, tts
+
+
+def _upstream_gpt_sovits_block(parsed: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Read the ``gpt_sovits`` block from the upstream TTS config.
+
+    The block is upstream's schema (``GPTSoVITSConfig``); Aemeath only
+    mirrors it for the live probe adapter, exactly as ``llm_configs`` is
+    mirrored for the conversation provider.
+
+    Args:
+        parsed: The parsed YAML document.
+
+    Returns:
+        The block as a plain dict, or ``None`` when absent.
+    """
+    tts_config = (parsed.get("character_config") or {}).get("tts_config") or {}
+    block = tts_config.get("gpt_sovits")
+    return dict(block) if isinstance(block, dict) else None
 
 
 def load_config(config_path: Optional[Path] = None) -> AemeathConfig:
@@ -460,7 +483,11 @@ def load_config(config_path: Optional[Path] = None) -> AemeathConfig:
                 screen_defaults.summary_max_age_seconds,
             ),
         ),
-        speech=SpeechConfig(asr_backend=asr_backend, tts_backend=tts_backend),
+        speech=SpeechConfig(
+            asr_backend=asr_backend,
+            tts_backend=tts_backend,
+            gpt_sovits=_upstream_gpt_sovits_block(upstream_parsed),
+        ),
         providers=ProviderSet(
             embedding=_provider(
                 providers_raw.get("embedding"), "AEMEATH_EMBEDDING_API_KEY"

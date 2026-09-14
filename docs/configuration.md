@@ -1,6 +1,6 @@
 # Aemeath 配置示例（无凭据，可提交）
 
-本文件是可提交的配置样例。实际运行配置见 `config/conf.aemeath.yaml`（已排除版本管理）。
+本文件是可提交的配置样例。实际运行配置见 `config/conf.aemeath.yaml`（同样受版本管理，因此只能出现 `${VAR}` 引用，不得写入字面密钥）。
 
 ## 一、密钥通过环境变量注入
 
@@ -73,6 +73,43 @@ character_config:
 
 这些是计划采用的默认值，应作为配置或测试常量调整，而不是散落在代码里。
 
+## 三之二、管理界面与配置读写（V2-T01）
+
+管理界面通过 Aemeath 自有的管理 API 读写**同一份权威配置**，不维护第二份副本。
+
+| 项 | 值 |
+| --- | --- |
+| 路由前缀 | `/aemeath/manage/` |
+| 读取 | `GET /aemeath/manage/overview` |
+| 保存模型 | `POST /aemeath/manage/model` |
+| 保存人设 | `POST /aemeath/manage/persona` |
+| 管理页地址 | `http://127.0.0.1:12393/?page=manage` |
+
+**已保存 vs 已生效。** 响应同时返回 `saved_revision` 与 `running_revision`，
+以及 `restart_required`。保存写入权威 YAML，但引擎不会热重载，因此模型与人设改动
+都标记为「已保存，重启后生效」。运行修订号取进程启动时那一份，**不会因保存而前进**，
+否则界面会把未生效的改动报成已生效。
+
+**并发修订。** 每次保存必须携带读取时的 `expected_revision`。修订号不匹配时返回
+**409** 且不写文件，避免覆盖其他窗口的较新改动。
+
+**保存失败不损坏旧配置。** 候选配置先完整校验（走上游 `validate_config`），通过后写
+临时文件再 `os.replace` 原子替换；任一步失败都保留原文件。
+
+**凭据。** 请求可以携带密钥，但它只写入本机凭据存储
+（`config/credentials.yaml`，已 gitignore），配置文件里留下的是 `${VAR}` 引用。
+响应**永不回显**密钥：只返回 `api_key_configured` 布尔值。
+
+**访问限制。** 管理写接口仅接受回环来源（对端地址与 `Origin` 都按回环判定），
+普通网页无法跨站改写本机设置。
+
+### 人设：旧原文与三字段
+
+旧配置只有 `persona_prompt` 一段自由文本。管理界面按身份／性格／回复风格三项编辑。
+**旧原文不会被自动拆分**：只有用户自己保存三项后才会切换来源。首次迁移时原文被复制到
+`aemeath_config.legacy_persona_prompt` 保留，因此切换后原文仍可查看，迁移可回溯。
+组装提示词时只会使用其中一个来源，不会同时注入。
+
 ## 四、本地数据位置
 
 | 内容 | 位置 |
@@ -81,6 +118,7 @@ character_config:
 | 备份目录 | `data/backups/` |
 | 日志与轮次指标 | `logs/` |
 | 上游运行日志 | `vendor/Open-LLM-VTuber/logs/` |
+| 管理界面保存的凭据 | `config/credentials.yaml`（已 gitignore，不进源码管理） |
 
 `data/`、`logs/`、`vendor/` 均已排除出版本管理。
 

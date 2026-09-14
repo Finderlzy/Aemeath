@@ -8,6 +8,12 @@ config/local.yaml
 config/local.*.yaml
 aemeath/config/local.yaml
 
+# Credential store written by the management API (aemeath/management/service.py).
+# It holds provider keys, so it must never be committed; the config file it backs
+# only ever contains a ${VAR} reference.
+config/credentials.yaml
+config/credentials.*.yaml
+
 # Acceptance run: this script injects real provider keys, so it stays local.
 # The acceptance *config* is committed — it holds variable names, not keys —
 # so the run stays reproducible on another machine.

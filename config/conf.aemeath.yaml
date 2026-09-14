@@ -1,4 +1,4 @@
-# Aemeath 首期运行配置（本机配置，不入源码版本管理）
+# Aemeath 首期运行配置
 #
 # 本文件是 Open-LLM-VTuber v1.2.1 的用户配置。Aemeath 的独立性通过以下方式保证：
 #   - 角色预设、数据、日志均指向 Aemeath 自己的位置，不写入上游目录
@@ -6,7 +6,10 @@
 #
 # 密钥不写在本文件里：下面的 api_key 字段留空或填占位符，
 # 真实密钥通过环境变量注入（见 docs/configuration.md）。
-# 该文件被 .gitignore 排除，不会被提交。
+#
+# 本文件**受版本管理**（`git ls-files` 可查），因此只能出现 `${VAR}` 引用，
+# 不得写入任何字面密钥、绝对个人路径或真实端点凭据。提交前跑
+# `scripts/check-secrets.ps1`。
 
 system_config:
   conf_version: 'v1.2.1'

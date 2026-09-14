@@ -1,0 +1,664 @@
+diff --git a/src/renderer/src/App.tsx b/src/renderer/src/App.tsx
+index 6bb1222..e94cc73 100644
+--- a/src/renderer/src/App.tsx
++++ b/src/renderer/src/App.tsx
+@@ -30,6 +30,25 @@ import WebSocketStatus from "./components/canvas/ws-status";
+ import Subtitle from "./components/canvas/subtitle";
+ import { ModeProvider, useMode } from "./context/mode-context";
+ import { AemeathProvider } from "./context/aemeath-context";
++import ManagePage from "./components/aemeath/manage-page";
++
++/**
++ * Whether this window is the management UI rather than the character.
++ *
++ * The management window must not mount the conversation stack: doing so would
++ * open a second WebSocket session, a second microphone and a second audio
++ * output for the same character. Selecting the page before any provider mounts
++ * is what guarantees the two windows stay independent.
++ */
++function isManagementWindow(): boolean {
++  if (typeof window === "undefined") return false;
++  const { pathname, hash, search } = window.location;
++  return (
++    pathname.replace(/\/+$/, "").endsWith("/manage") ||
++    hash.startsWith("#/manage") ||
++    new URLSearchParams(search).get("page") === "manage"
++  );
++}
+ 
+ function AppContent(): JSX.Element {
+   const [showSidebar, setShowSidebar] = useState(true);
+@@ -157,6 +176,16 @@ function AppContent(): JSX.Element {
+ }
+ 
+ function App(): JSX.Element {
++  // The management window stops here: no character providers, no WebSocket, no
++  // microphone. It talks to the backend over the management HTTP API only.
++  if (isManagementWindow()) {
++    return (
++      <ChakraProvider value={defaultSystem}>
++        <ManagePage />
++      </ChakraProvider>
++    );
++  }
++
+   return (
+     <ChakraProvider value={defaultSystem}>
+       {/* ModeProvider needs to wrap AppContent to provide mode to getGlobalStyles */}
+diff --git a/src/renderer/src/components/aemeath/manage-page.tsx b/src/renderer/src/components/aemeath/manage-page.tsx
+new file mode 100644
+index 0000000..04975c7
+--- /dev/null
++++ b/src/renderer/src/components/aemeath/manage-page.tsx
+@@ -0,0 +1,397 @@
++/* eslint-disable @typescript-eslint/no-explicit-any */
++/**
++ * Aemeath management window: overview, model and persona.
++ *
++ * The first management loop (v2 task V2-T01). Three pages, one rule running
++ * through all of them: **what the user sees must be what is really configured,
++ * and "saved" must never be shown as "in effect"**.
++ *
++ * The component reads the backend overview on mount and after every save, so
++ * the displayed revision always comes from the file rather than from optimistic
++ * local state. A save that the backend rejects leaves the form filled in — the
++ * user's typing is not discarded because of a validation error.
++ *
++ * This page is deliberately separate from the character window: it performs no
++ * conversation, opens no microphone and plays no audio.
++ */
++import { useCallback, useEffect, useState } from 'react';
++import { Box, Button, Flex, Heading, Input, Text, Textarea } from '@chakra-ui/react';
++
++import {
++  describeEffectState,
++  fetchOverview,
++  ManagementError,
++  saveModel,
++  savePersona,
++  type FieldError,
++  type OverviewResponse,
++} from '../../services/aemeath-management';
++
++type Page = 'overview' | 'model' | 'persona';
++
++const NAV: { id: Page; label: string }[] = [
++  { id: 'overview', label: '概览' },
++  { id: 'model', label: '模型' },
++  { id: 'persona', label: '人设' },
++];
++
++/** Banner describing the outcome of the last action. */
++interface Notice {
++  kind: 'ok' | 'error' | 'info';
++  text: string;
++}
++
++const NOTICE_COLOR: Record<Notice['kind'], string> = {
++  ok: 'green.300',
++  error: 'red.300',
++  info: 'blue.200',
++};
++
++function errorText(errors: FieldError[], fallback: string): string {
++  if (!errors || errors.length === 0) return fallback;
++  return errors.map((e) => `${e.field}：${e.message}`).join('；');
++}
++
++export default function ManagePage(): JSX.Element {
++  const [page, setPage] = useState<Page>('overview');
++  const [overview, setOverview] = useState<OverviewResponse | null>(null);
++  const [notice, setNotice] = useState<Notice | null>(null);
++  const [busy, setBusy] = useState(false);
++  const [loadError, setLoadError] = useState('');
++
++  const [baseUrl, setBaseUrl] = useState('');
++  const [model, setModel] = useState('');
++  const [apiKey, setApiKey] = useState('');
++
++  const [identity, setIdentity] = useState('');
++  const [personality, setPersonality] = useState('');
++  const [replyStyle, setReplyStyle] = useState('');
++
++  const applyOverview = useCallback((data: OverviewResponse) => {
++    setOverview(data);
++    setBaseUrl(data.model.base_url);
++    setModel(data.model.model);
++    setIdentity(data.persona.identity);
++    setPersonality(data.persona.personality);
++    setReplyStyle(data.persona.reply_style);
++  }, []);
++
++  const reload = useCallback(async () => {
++    try {
++      const data = await fetchOverview();
++      applyOverview(data);
++      setLoadError('');
++    } catch (error) {
++      // A failed read is shown as its own state rather than as an empty form,
++      // because an empty form invites the user to "fix" a value that is fine.
++      setLoadError(error instanceof Error ? error.message : String(error));
++    }
++  }, [applyOverview]);
++
++  useEffect(() => {
++    void reload();
++  }, [reload]);
++
++  /**
++   * Run one save and fold the result back into the screen.
++   *
++   * The API key field is cleared on success only: after a rejected save the user
++   * would otherwise have to retype a value that was never wrong.
++   */
++  const runSave = async (
++    action: () => Promise<any>,
++    successText: string,
++    onSuccess?: () => void,
++  ) => {
++    setBusy(true);
++    setNotice(null);
++    try {
++      const result = await action();
++      if (result?.ok) {
++        onSuccess?.();
++        const effect = result.restart_required
++          ? '已保存，重启 Aemeath 后生效。'
++          : '已保存，且运行中的服务已使用该配置。';
++        setNotice({ kind: 'ok', text: `${successText}${effect}` });
++      } else {
++        setNotice({
++          kind: 'error',
++          text: errorText(result?.errors ?? [], result?.message || '保存失败。'),
++        });
++      }
++      await reload();
++    } catch (error) {
++      const conflict =
++        error instanceof ManagementError && (error as ManagementError).status === 409;
++      if (conflict) {
++        // A conflict is recoverable and must be explained, not hidden: the user
++        // needs to know their edit was not applied because the file moved on.
++        setNotice({
++          kind: 'error',
++          text: '配置已被其他操作修改，你的改动没有保存。页面已刷新为最新配置。',
++        });
++        await reload();
++      } else {
++        setNotice({
++          kind: 'error',
++          text: error instanceof Error ? error.message : String(error),
++        });
++      }
++    } finally {
++      setBusy(false);
++    }
++  };
++
++  const effect = overview ? describeEffectState(overview) : null;
++
++  return (
++    <Flex minHeight="100vh" background="gray.900" color="white">
++      <Box width="180px" padding="4" borderRightWidth="1px" borderColor="whiteAlpha.300">
++        <Heading size="sm" marginBottom="4">
++          Aemeath 管理
++        </Heading>
++        {NAV.map((item) => (
++          <Button
++            key={item.id}
++            display="block"
++            width="100%"
++            marginBottom="2"
++            variant={page === item.id ? 'solid' : 'ghost'}
++            colorPalette={page === item.id ? 'blue' : undefined}
++            onClick={() => setPage(item.id)}
++          >
++            {item.label}
++          </Button>
++        ))}
++      </Box>
++
++      <Box flex="1" padding="6" overflowY="auto">
++        {loadError && (
++          <Box
++            background="red.900"
++            borderWidth="1px"
++            borderColor="red.400"
++            padding="3"
++            marginBottom="4"
++            borderRadius="md"
++          >
++            <Text fontWeight="bold">无法读取配置</Text>
++            <Text fontSize="sm">{loadError}</Text>
++            <Button size="sm" marginTop="2" onClick={() => void reload()}>
++              重试
++            </Button>
++          </Box>
++        )}
++
++        {notice && (
++          <Box
++            background="blackAlpha.400"
++            borderWidth="1px"
++            borderColor={NOTICE_COLOR[notice.kind]}
++            padding="3"
++            marginBottom="4"
++            borderRadius="md"
++          >
++            <Text fontSize="sm">{notice.text}</Text>
++          </Box>
++        )}
++
++        {effect && (
++          <Box
++            background="blackAlpha.300"
++            borderWidth="1px"
++            borderColor={effect.pending ? 'orange.300' : 'green.300'}
++            padding="3"
++            marginBottom="4"
++            borderRadius="md"
++          >
++            <Text fontWeight="bold">{effect.label}</Text>
++            <Text fontSize="sm">{effect.detail}</Text>
++          </Box>
++        )}
++
++        {page === 'overview' && overview && (
++          <Box>
++            <Heading size="md" marginBottom="4">
++              概览
++            </Heading>
++            <Text fontSize="sm" marginBottom="1">
++              配置文件：{overview.config_path}
++            </Text>
++            <Text fontSize="sm" marginBottom="1">
++              已保存修订：{overview.saved_revision || '(无)'}
++            </Text>
++            <Text fontSize="sm" marginBottom="4">
++              运行中修订：{overview.running_revision || '(无)'}
++            </Text>
++
++            <Heading size="sm" marginBottom="2">
++              当前对话模型
++            </Heading>
++            <Text fontSize="sm">连接：{overview.model.provider || '(未配置)'}</Text>
++            <Text fontSize="sm">服务地址：{overview.model.base_url || '(未配置)'}</Text>
++            <Text fontSize="sm">模型：{overview.model.model || '(未配置)'}</Text>
++            <Text fontSize="sm" marginBottom="4">
++              凭据：
++              {overview.model.api_key_configured
++                ? `已配置${overview.model.api_key_env ? `（来自 ${overview.model.api_key_env}）` : ''}`
++                : '未配置'}
++            </Text>
++
++            <Heading size="sm" marginBottom="2">
++              当前人设来源
++            </Heading>
++            <Text fontSize="sm">
++              {overview.persona.mode === 'split' ? '三字段（身份／性格／回复风格）' : '旧原文'}
++            </Text>
++          </Box>
++        )}
++
++        {page === 'model' && (
++          <Box maxWidth="640px">
++            <Heading size="md" marginBottom="4">
++              模型
++            </Heading>
++            <Text fontSize="sm" marginBottom="4">
++              使用 OpenAI 兼容协议。服务地址可指向任意兼容端点，不限于特定厂商。
++            </Text>
++
++            <Text fontSize="sm" marginBottom="1">
++              服务地址
++            </Text>
++            <Input
++              value={baseUrl}
++              onChange={(e) => setBaseUrl(e.target.value)}
++              placeholder="https://api.example.com/v1"
++              marginBottom="3"
++            />
++
++            <Text fontSize="sm" marginBottom="1">
++              模型名称
++            </Text>
++            <Input
++              value={model}
++              onChange={(e) => setModel(e.target.value)}
++              placeholder="model-name"
++              marginBottom="3"
++            />
++
++            <Text fontSize="sm" marginBottom="1">
++              凭据
++            </Text>
++            <Input
++              type="password"
++              value={apiKey}
++              onChange={(e) => setApiKey(e.target.value)}
++              placeholder={
++                overview?.model.api_key_configured ? '已配置（留空则保持不变）' : '填写后保存到本机凭据存储'
++              }
++              marginBottom="1"
++            />
++            <Text fontSize="xs" color="whiteAlpha.700" marginBottom="4">
++              凭据保存在本机，不会写入配置文件，也不会回显。管理密钥需要重启后生效。
++            </Text>
++
++            <Button
++              colorPalette="blue"
++              disabled={busy || !overview}
++              onClick={() =>
++                void runSave(
++                  () =>
++                    saveModel({
++                      baseUrl,
++                      model,
++                      apiKey,
++                      expectedRevision: overview!.saved_revision,
++                    }),
++                  '模型配置已保存。',
++                  () => setApiKey(''),
++                )
++              }
++            >
++              保存
++            </Button>
++          </Box>
++        )}
++
++        {page === 'persona' && (
++          <Box maxWidth="640px">
++            <Heading size="md" marginBottom="4">
++              人设
++            </Heading>
++
++            {overview?.persona.mode === 'legacy' && (
++              <Box
++                background="blackAlpha.400"
++                borderWidth="1px"
++                borderColor="orange.300"
++                padding="3"
++                marginBottom="4"
++                borderRadius="md"
++              >
++                <Text fontSize="sm" fontWeight="bold">
++                  当前使用旧人设原文
++                </Text>
++                <Text fontSize="sm">
++                  保存下面的三项后才会切换到三字段；原文会保留，不会被自动改写。
++                </Text>
++                <Text fontSize="xs" whiteSpace="pre-wrap" marginTop="2" color="whiteAlpha.800">
++                  {overview.persona.legacy_prompt}
++                </Text>
++              </Box>
++            )}
++
++            <Text fontSize="sm" marginBottom="1">
++              身份（她是谁）
++            </Text>
++            <Textarea
++              value={identity}
++              onChange={(e) => setIdentity(e.target.value)}
++              marginBottom="3"
++              rows={3}
++            />
++
++            <Text fontSize="sm" marginBottom="1">
++              性格（稳定倾向）
++            </Text>
++            <Textarea
++              value={personality}
++              onChange={(e) => setPersonality(e.target.value)}
++              marginBottom="3"
++              rows={3}
++            />
++
++            <Text fontSize="sm" marginBottom="1">
++              回复风格（措辞、语气与长度）
++            </Text>
++            <Textarea
++              value={replyStyle}
++              onChange={(e) => setReplyStyle(e.target.value)}
++              marginBottom="3"
++              rows={3}
++            />
++
++            <Button
++              colorPalette="blue"
++              disabled={busy || !overview}
++              onClick={() =>
++                void runSave(
++                  () =>
++                    savePersona({
++                      identity,
++                      personality,
++                      replyStyle,
++                      expectedRevision: overview!.saved_revision,
++                    }),
++                  '人设已保存。',
++                )
++              }
++            >
++              保存
++            </Button>
++          </Box>
++        )}
++      </Box>
++    </Flex>
++  );
++}
+diff --git a/src/renderer/src/services/aemeath-management.ts b/src/renderer/src/services/aemeath-management.ts
+new file mode 100644
+index 0000000..de0ce07
+--- /dev/null
++++ b/src/renderer/src/services/aemeath-management.ts
+@@ -0,0 +1,208 @@
++/**
++ * Aemeath management API client.
++ *
++ * The management surface is the Aemeath FastAPI routes mounted at
++ * `/aemeath/manage/`, **not** the chat WebSocket. It is deliberately a separate
++ * transport:
++ *
++ * - configuration is read and written by HTTP, so the management page works
++ *   while the character session is closed or reconnecting;
++ * - nothing here touches the conversation bridge, so opening the page cannot
++ *   start a second session or a second microphone.
++ *
++ * Field names come from the backend response. There is no second copy of the
++ * contract here; the request bodies only carry what the schemas accept.
++ */
++
++/** A single rejected field, addressed for the UI to focus. */
++export interface FieldError {
++  field: string;
++  message: string;
++}
++
++/** Result of a save attempt. */
++export interface SaveResult {
++  ok: boolean;
++  errors: FieldError[];
++  conflict: boolean;
++  message: string;
++  saved_revision: string;
++  running_revision: string;
++  restart_required: boolean;
++}
++
++/** Conversation model connection. No key value is ever returned. */
++export interface ModelOverview {
++  provider: string;
++  base_url: string;
++  model: string;
++  api_key_configured: boolean;
++  api_key_env: string;
++}
++
++/** Persona as configured, with the legacy text preserved. */
++export interface PersonaOverview {
++  mode: 'legacy' | 'split';
++  identity: string;
++  personality: string;
++  reply_style: string;
++  legacy_prompt: string;
++  active_prompt: string;
++}
++
++/** Everything the overview page shows. */
++export interface OverviewResponse {
++  config_path: string;
++  saved_revision: string;
++  running_revision: string;
++  restart_required: boolean;
++  model: ModelOverview;
++  persona: PersonaOverview;
++  read_error: string;
++}
++
++/** Base path of the management routes. */
++export const MANAGEMENT_BASE = '/aemeath/manage';
++
++/**
++ * Resolve the management API origin.
++ *
++ * In the browser the page is served by the same backend that hosts the routes,
++ * so a relative URL is correct and keeps the loopback restriction satisfied.
++ * Electron loads the renderer from `file://`, where a relative URL has no host;
++ * the backend address is used instead.
++ */
++function managementBaseUrl(): string {
++  if (typeof window !== 'undefined' && window.location.protocol.startsWith('http')) {
++    return MANAGEMENT_BASE;
++  }
++  return `http://127.0.0.1:12393${MANAGEMENT_BASE}`;
++}
++
++/** Error carrying the HTTP status so callers can distinguish a conflict. */
++export class ManagementError extends Error {
++  status: number;
++  payload: SaveResult | null;
++
++  constructor(message: string, status: number, payload: SaveResult | null = null) {
++    super(message);
++    this.name = 'ManagementError';
++    this.status = status;
++    this.payload = payload;
++  }
++}
++
++async function request<T>(path: string, init?: RequestInit): Promise<T> {
++  let response: Response;
++  try {
++    response = await fetch(`${managementBaseUrl()}${path}`, {
++      headers: { 'Content-Type': 'application/json' },
++      ...init,
++    });
++  } catch (error) {
++    // A transport failure is reported as its own case: "the backend is not
++    // running" must not be shown as a validation problem in the form.
++    throw new ManagementError(
++      `无法连接管理服务：${error instanceof Error ? error.message : String(error)}`,
++      0,
++      null,
++    );
++  }
++
++  const text = await response.text();
++  let data: unknown = null;
++  try {
++    data = text ? JSON.parse(text) : null;
++  } catch {
++    throw new ManagementError('管理服务返回了无法解析的内容。', response.status, null);
++  }
++
++  if (!response.ok) {
++    const payload = (data ?? null) as SaveResult | null;
++    const message =
++      (payload && payload.message) ||
++      (payload && payload.errors?.length ? payload.errors[0].message : '') ||
++      `请求失败（HTTP ${response.status}）`;
++    throw new ManagementError(message, response.status, payload);
++  }
++
++  return data as T;
++}
++
++/** Read the current model, persona and revision state. */
++export async function fetchOverview(): Promise<OverviewResponse> {
++  return request<OverviewResponse>('/overview');
++}
++
++/**
++ * Save the conversation model connection.
++ *
++ * `expectedRevision` is required by the backend; omitting it would let this
++ * client overwrite a change made elsewhere.
++ */
++export async function saveModel(input: {
++  baseUrl: string;
++  model: string;
++  apiKey?: string;
++  expectedRevision: string;
++}): Promise<SaveResult> {
++  return request<SaveResult>('/model', {
++    method: 'POST',
++    body: JSON.stringify({
++      base_url: input.baseUrl,
++      model: input.model,
++      api_key: input.apiKey || null,
++      expected_revision: input.expectedRevision,
++    }),
++  });
++}
++
++/** Save the three persona fields. */
++export async function savePersona(input: {
++  identity: string;
++  personality: string;
++  replyStyle: string;
++  expectedRevision: string;
++}): Promise<SaveResult> {
++  return request<SaveResult>('/persona', {
++    method: 'POST',
++    body: JSON.stringify({
++      identity: input.identity,
++      personality: input.personality,
++      reply_style: input.replyStyle,
++      expected_revision: input.expectedRevision,
++    }),
++  });
++}
++
++/**
++ * Whether a change is saved but not yet adopted by the running service.
++ *
++ * Kept as one function so every screen answers the question the same way: a
++ * successful save is not the same thing as a running change.
++ */
++export function describeEffectState(overview: OverviewResponse): {
++  label: string;
++  detail: string;
++  pending: boolean;
++} {
++  if (overview.read_error) {
++    return {
++      label: '读取失败',
++      detail: overview.read_error,
++      pending: false,
++    };
++  }
++  if (overview.restart_required) {
++    return {
++      label: '已保存，尚未生效',
++      detail: '配置已写入本地文件，重启 Aemeath 后生效。',
++      pending: true,
++    };
++  }
++  return {
++    label: '已生效',
++    detail: '运行中的服务正在使用当前配置。',
++    pending: false,
++  };
++}

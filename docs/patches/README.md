@@ -13,6 +13,7 @@
 | 2 | `0002-register-aemeath-agent-config.patch` | `src/open_llm_vtuber/config_manager/agent.py` | 允许 `aemeath_agent` 通过配置校验 |
 | 3 | `0003-bridge-aemeath-runtime.patch` | `service_context.py`、`websocket_handler.py`、`conversations/*` | 桥接层：协议扩展、轮次接入、输出闸门、迟到音频丢弃、SQLite 历史、主动调度与一次性问候 |
 | 4 | `0004-fix-tls-for-conversation-endpoint.patch` | `src/open_llm_vtuber/agent/stateless_llm/openai_compatible_llm.py` | 对话端点使用受 `AEMEATH_TLS_INSECURE` 控制的 HTTP 客户端 |
+| 5 | `0005-mount-aemeath-management-routes.patch` | `server.py` | 挂载 Aemeath 管理 API（`/aemeath/manage/`），在 frontend 通配挂载**之前**注册 |
 
 `0001` 已包含 agent 工厂的**完整**改动（注册 + 桥接接线），不要把旧版注册补丁叠加使用。
 
@@ -24,7 +25,33 @@ git apply ..\..\docs\patches\0001-register-aemeath-agent.patch
 git apply ..\..\docs\patches\0002-register-aemeath-agent-config.patch
 git apply ..\..\docs\patches\0003-bridge-aemeath-runtime.patch
 git apply ..\..\docs\patches\0004-fix-tls-for-conversation-endpoint.patch
+git apply ..\..\docs\patches\0005-mount-aemeath-management-routes.patch
 ```
+
+## 0005 的改动要点
+
+管理 API（`aemeath/management/`）是 Aemeath 自有的 FastAPI 子应用，需要在
+上游 `WebSocketServer.__init__` 里挂到同一个 app 上：
+
+```python
+try:
+    from aemeath.management.routes import install_management_routes
+
+    install_management_routes(self.app)
+except ImportError as exc:
+    logger.warning(...)
+```
+
+两处容易出错的地方：
+
+1. **必须注册在 frontend 通配挂载之前。** `self.app.mount("/", StaticFiles(directory="frontend"))`
+   会接管所有未匹配路径，注册顺序反了就会让管理路由被静态文件吞掉，表现为 404。
+2. **`logger` 必须存在。** `server.py` 原本没有导入 `loguru` 的 logger；兜底分支里的
+   `logger.warning` 一旦触发就是 `NameError`，而正常路径永远不会走到它。
+   因此 `0005` 同时补了模块级 `from loguru import logger`。
+
+补丁对 `aemeath` 采用**惰性导入**，与 `0001` 的取舍一致：上游单独运行时没有
+Aemeath 代码也能启动，只是没有管理接口。
 
 ## 0004 的改动要点
 
@@ -208,11 +235,17 @@ GitGuardian 告警 `[Finderlzy/Aemeath] DeepSeek API Key exposed on GitHub`
 | 补丁文件 | 目标仓库 | 作用 |
 | --- | --- | --- |
 | `docs/patches/web/0001-aemeath-web-client.patch` | `vendor/Open-LLM-VTuber-Web` | 协议协商（v2）、显示与播放端到端回执上报、迟到音频拒绝与静音保护、Aemeath 上下文与打断联动 |
+| `docs/patches/web/0002-aemeath-management-ui.patch` | `vendor/Open-LLM-VTuber-Web` | 管理界面（概览／模型／人设）与 `aemeath-management` API 客户端；管理窗口路由 |
+
+**web 补丁按序套用**，`0002` 基于 `0001` 之后的 `App.tsx` 生成。重新生成 `0002`
+时必须先在 `0001` 已套用的树上做，否则 `git apply` 会在 `App.tsx` 报
+`patch does not apply`。
 
 套用命令：
 ```powershell
 cd vendor/Open-LLM-VTuber-Web
 git apply ..\..\docs\patches\web\0001-aemeath-web-client.patch
+git apply ..\..\docs\patches\web\0002-aemeath-management-ui.patch
 ```
 
 套用后执行编译并部署到后端：

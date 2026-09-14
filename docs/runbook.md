@@ -106,9 +106,14 @@ JS 仅 hash 不同，说明源码与产物对应。
 
 ## 配置
 
-- 权威配置：`config/conf.aemeath.yaml`（纳入版本管理，不含密钥）
+- 权威配置：`config/conf.aemeath.yaml`（**受版本管理**；只允许 `${VAR}` 引用，
+  不得写入字面密钥；可提交的说明样例另见 [configuration.md](configuration.md)）
 - `scripts/run_server.py` 启动时把它复制为上游读取的 `vendor/Open-LLM-VTuber/conf.yaml`
 - 密钥用 `${VAR}` 形式引用环境变量，由上游 `read_yaml` 展开
+
+> `_deploy_config()` **仅在内容不同时**才覆盖 `vendor/Open-LLM-VTuber/conf.yaml`。
+> 若上游那份被其他进程改过（例如上游的 config upgrade 写了备份并重写），启动时会以
+> 权威配置为准重新部署；排查"改了没生效"时先比对这两个文件。
 
 必需的环境变量：
 
@@ -200,6 +205,35 @@ Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
 
 `ai-speak-signal` 对 Aemeath 只做资格检查：后端返回 `aemeath-proactive-decision`，
 不会启动 conversation。主动轮次的唯一来源是后端调度器，客户端不能绕过它。
+
+## 管理界面（V2-T01）
+
+服务运行中打开管理页：
+
+```
+http://127.0.0.1:12393/?page=manage
+```
+
+也可直接调用管理 API（仅回环可访问）：
+
+```powershell
+# 读取当前模型、人设与修订状态
+Invoke-RestMethod -Uri 'http://127.0.0.1:12393/aemeath/manage/overview'
+```
+
+页面含概览、模型、人设三项。要点：
+
+- 保存写入**权威配置** `config/conf.aemeath.yaml`，重启服务后生效；页面区分
+  「已保存」与「已生效」，`restart_required` 为真时说明尚未被运行中的服务采用。
+- 保存需携带 `expected_revision`；修订不匹配返回 **409** 且不覆盖较新的改动，
+  页面会提示刷新。
+- 凭据只写入本机 `config/credentials.yaml`（已 gitignore），配置文件里留 `${VAR}` 引用，
+  接口不回显密钥。
+- 旧 `persona_prompt` 原文不会被自动拆分；首次保存三项人设时，原文归档到
+  `aemeath_config.legacy_persona_prompt`。
+
+管理页与角色页是**互斥的两个窗口**：管理页不建立对话连接、不打开麦克风、不播放音频，
+因此打开它不会产生第二路会话。
 
 ## 状态与记忆管理
 

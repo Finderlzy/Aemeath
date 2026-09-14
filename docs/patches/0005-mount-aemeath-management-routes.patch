@@ -1,0 +1,33 @@
+diff --git a/src/open_llm_vtuber/server.py b/src/open_llm_vtuber/server.py
+index 7a34b7b..f108b7c 100644
+--- a/src/open_llm_vtuber/server.py
++++ b/src/open_llm_vtuber/server.py
+@@ -10,6 +10,7 @@ import os
+ import shutil
+ 
+ from fastapi import FastAPI
++from loguru import logger
+ from starlette.middleware.cors import CORSMiddleware
+ from starlette.responses import Response
+ from starlette.staticfiles import StaticFiles as StarletteStaticFiles
+@@ -141,6 +142,20 @@ class WebSocketServer:
+             name="web_tool",
+         )
+ 
++        # Aemeath management API (v2 config read/write). Registered before the
++        # frontend catch-all mount below, because that mount owns "/" and would
++        # otherwise swallow these paths. Imported lazily so upstream still runs
++        # standalone without Aemeath's code on the path.
++        try:
++            from aemeath.management.routes import install_management_routes
++
++            install_management_routes(self.app)
++        except ImportError as exc:
++            logger.warning(
++                "Aemeath management routes unavailable ({}); continuing without them.",
++                exc,
++            )
++
+         # Mount main frontend last (as catch-all)
+         self.app.mount(
+             "/",

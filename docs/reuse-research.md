@@ -1,5 +1,15 @@
 # 增量复用调研
 
+## v2.1 Live2D 制作复用核查（2026-09-14）
+
+- v4 为 1254 × 1254 RGB 平面图。内置 imagegen 的抠图尝试输出了绘制的棋盘格而非 alpha，且有细节漂移，已删除。生成式输出不能不经检查直接充当分层源稿。
+- 官方下载来源为 `cubism.live2d.com/editor/bin/Live2D_Cubism_Setup_5.3.00.exe` 与 `download.kde.org/stable/krita/5.3.3/krita-x64-5.3.3-setup.exe`；下载时 SHA256 与 winget 清单一致，数字签名有效。用户已安装到 D 盘，程序文件存在；这不等于启动、编辑模式、PSD 兼容或导出通过。工具链验证由 V21-T01 承接，不自动购买或激活 PRO 试用。
+- 复用 Krita 分层编辑／PSD 与 Cubism Editor／Viewer，不自制 moc3 编译器。编辑器可自动操作的范围、PSD 透明效果、所用编辑模式限制与旧客户端 Core 的导出兼容性仍需小样验证；失败则阻塞完整分层／绑定并记录人工操作方案。
+- `aemeath/management/live2d.py` 在规划基线 `5e0f25a` 中使用上游 `model_dict.json` 与 `character_config.live2d_model_name`，模型发现只检查 model3.json 是否存在，`is_official_model` 当前固定为 false。复用现有管理入口，在接入任务补足真实包完整性及身份判定，不能根据文件名宣称模型可运行。
+- 固定客户端 `src/renderer/WebSDK/src/lappmodel.ts` 已使用 EyeBlink、LipSync、头部角度与视线参数；仍需按 [制作契约](live2d-production.md) 验证实际导出和动作叠加。SDK／Core 保持项目固定基线，不因新编辑器默认升级整个客户端。
+
+以上为文件与源码核查，未执行 Krita／Cubism 导入导出或正式角色验收。原始参考、视频与源工程留本地，本轮入库定稿预览仅作为计划依据。
+
 核查日期：2026-09-14。服务于 [v2 需求](requirements.md)，属于源码与文档核查，未进行学习效果、训练或桌面运行测试。现有底座固定信息继续以 [上游记录](upstream.md) 为准。
 
 ## MaiBot：人设、表达与黑话

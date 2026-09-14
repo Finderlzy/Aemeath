@@ -54,6 +54,5 @@ htmlcov/
 
 # Local reference material (character art, video, voice recordings). Source
 # assets for future Live2D and voice work; large and machine-local, so they stay
-# out of source control. The production record for these assets is being moved
-# to the tracked docs/live2d-production.md by the parallel v2.1 work.
+# out of source control. See docs/live2d-production.md.
 references/

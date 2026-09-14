@@ -892,13 +892,12 @@ GitHub 状态本次未能实时核实：`gh` 不在 PATH，公开 REST 查询返
 - **声音试听未听到实际音频。** 本地 GPT-SoVITS 服务未在本轮启动，试听路径验证到
   「明确报告不可用」为止；真实合成与试听属既有 T05 闭环，本轮未重跑。
 - **正式爱弥斯音色与 Live2D 模型仍缺**，因此本任务的示例标注（`is_official_voice=false`、
-  `is_official_model=false`）与"不提供无法加载的条目"是当前正确行为。依据是本地
-  Live2D 制作记录（位于 `references/character/live2d-production.md`；该目录为本地素材、
-  已 gitignore，故此处不设链接）：外观仅定稿到原稿，抠图、拆层与 Cubism 绑定均未完成，
+  `is_official_model=false`）与"不提供无法加载的条目"是当前正确行为。依据是
+  [Live2D 制作契约](live2d-production.md)（原位于 `references/character/live2d-production.md`，
+  该目录为本地素材、已 gitignore；制作记录已迁入受版本管理的 `docs/`）：外观仅定稿到原稿，
+  抠图、拆层与 Cubism 绑定均未完成，
   **没有可用的 `.moc3` 运行模型**，并明确要求"不替换上游示例模型、不修改运行配置、
   不把平面立绘标记为已完成 Live2D"；`references/voice/` 下的语音合集为游戏实机录制，
   按既有结论（3D 空间混响、非纯净干声）不作正式音色。本轮未使用这些素材，
   也未改动上游示例模型与模型字典的既有取值。
-  > 该制作记录正由并行的 v2.1 工作迁往受版本管理的 `docs/live2d-production.md`；
-  > 迁移完成后本节应改指新路径。
 - 与 V2-T03 的双窗口集成验收未执行：本任务完成**不等于**「首批可用」通过。

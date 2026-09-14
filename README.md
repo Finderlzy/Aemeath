@@ -1,5 +1,7 @@
 # Aemeath (爱弥斯)
 
+**v2.1 Live2D 制作计划**与 v2 并行推进：角色立绘已定稿，分层、绑定和正式桌面接入尚未完成。参见 [实施计划](docs/implementation-plan.md#v21-live2d-并行制作计划2026-09-14) 与 [制作契约及定稿](docs/live2d-production.md)。正式模型未完成不阻塞 v2。
+
 首个正式源码版本：**v1.0.0**。下载与已知限制见 [GitHub Release](https://github.com/Finderlzy/Aemeath/releases/tag/v1.0.0)，验收证据见 [交付记录](docs/delivery.md)。版本字段以 `aemeath/__init__.py` 的 `__version__` 为准，发布标签使用 `vMAJOR.MINOR.PATCH`；后续按 SemVer 维护首期接口与配置兼容性。
 
 Windows 桌面 AI 伙伴，角色原型为《鸣潮》爱弥斯。首期以 **Open-LLM-VTuber v1.2.1** 为运行底座，通过有序补丁与统一桥接层（`AemeathBridge`）深度扩展，支持本地事实与经历记忆（SQLite + 向量检索）、屏幕观察理解、主动交流节奏调度、情境状态感知（课堂静音）、本地 SenseVoice 语音识别与本地 GPT-SoVITS 语音合成。

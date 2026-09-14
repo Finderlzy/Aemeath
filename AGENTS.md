@@ -6,6 +6,8 @@ Aemeath 是 Windows 桌面 AI 伙伴，角色原型为《鸣潮》爱弥斯，�
 
 项目术语统一维护在 [context.md](context.md)。v2 增量范围见需求中的 v2 章节，复用依据见 [增量调研](docs/reuse-research.md)；待决策条目不能当作已确定实现要求，既有首期计划不代表 v2 已完成规划。
 
+v2.1 为与 v2 并行的正式 Live2D 制作与接入，开工前读取实施计划中的 v2.1 章节及 [制作契约](docs/live2d-production.md)。用户已选定 v4 立绘；分层、绑定与运行验收尚未完成。资产制作不阻塞 v2，桌面集成单向依赖 v2 管理与桌面任务，单项状态以 Issues 为准。
+
 首期底座为 **Open-LLM-VTuber v1.2.1**（固定在 `vendor/Open-LLM-VTuber`，不入版本管理）。
 Aemeath 核心模块位于 `aemeath/`，通过 [四个补丁](docs/patches/README.md) **按序**接入。
 客户端源码在 `vendor/Open-LLM-VTuber-Web`（同样不入版本管理），构建后部署到上游 `frontend/`。

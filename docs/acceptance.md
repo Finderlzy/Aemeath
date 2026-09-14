@@ -783,9 +783,11 @@ GitHub 状态本次未能实时核实：`gh` 不在 PATH，公开 REST 查询返
 
 ## 十七、V2-T02 声音、记忆与 Live2D 管理（2026-09-14）
 
-**任务**：[#15](https://github.com/Finderlzy/Aemeath/issues/15)（V2-T02，V2-M1 管理基础）。
+**任务**：[#15](https://github.com/Finderlzy/Aemeath/issues/15)（V2-T02，V2-M1 管理基础）。**已关闭（completed）**。
 **基线**：远端 `main` 的 `592eb02`，任务分支 `issue-15-voice-memory-live2d-management`。
+**集成**：提交 `5e0f25a` 已快进合并进远端 `main`（合并前后 tree hash 均为 `e762ae0f`）。
 **范围**：在 V2-T01 的配置契约上补齐记忆、声音与 Live2D 三个管理页面及其后端与路由。
+**里程碑**：随本任务关闭，V2-M1（管理基础）完成（open=0，closed=2）。
 
 ### 开发前门禁：记忆一致性 fixture
 

@@ -414,7 +414,7 @@ async def test_unchanged_save_does_not_claim_a_restart_is_needed(manage_env):
 async def test_overview_never_returns_the_api_key(manage_env):
     """A literal key in the config is reported as configured, never echoed."""
     document = manage_env.document()
-    secret = "sk-literal-secret-value-for-test"
+    secret = "sk-REDACTED-literal-fixture"
     document["character_config"]["agent_config"]["llm_configs"][
         "openai_compatible_llm"
     ]["llm_api_key"] = secret
@@ -446,13 +446,13 @@ async def test_overview_reports_a_variable_reference_as_configured(manage_env):
     # Before the credential exists anywhere, the reference is not configured.
     assert manage_env.service().overview()["model"]["api_key_configured"] is False
 
-    save_credential("AEMEATH_TEST_LLM_KEY", "sk-stored-elsewhere")
+    save_credential("AEMEATH_TEST_LLM_KEY", "sk-REDACTED-stored-fixture")
 
     overview = manage_env.service().overview()
     assert overview["model"]["api_key_configured"] is True
     assert overview["model"]["api_key_env"] == "AEMEATH_TEST_LLM_KEY"
     # The stored value never appears, in any field.
-    assert "sk-stored-elsewhere" not in yaml.safe_dump(overview, allow_unicode=True)
+    assert "sk-REDACTED-stored-fixture" not in yaml.safe_dump(overview, allow_unicode=True)
 
 
 async def test_saving_a_key_stores_a_reference_not_the_secret(manage_env):
@@ -462,7 +462,7 @@ async def test_saving_a_key_stores_a_reference_not_the_secret(manage_env):
     the failure that produced the 2026-09-14 leak.
     """
     service = manage_env.service()
-    secret = "sk-another-literal-secret"
+    secret = "sk-REDACTED-another-fixture"
 
     result = service.save_model(
         base_url="https://api.changed.invalid/v1",
@@ -479,7 +479,7 @@ async def test_saving_a_key_stores_a_reference_not_the_secret(manage_env):
 async def test_a_failed_save_does_not_leak_the_submitted_key(manage_env):
     """Even a rejected save must not echo the credential back."""
     service = manage_env.service()
-    secret = "sk-rejected-secret"
+    secret = "sk-REDACTED-rejected-fixture"
 
     result = service.save_model(
         base_url="",

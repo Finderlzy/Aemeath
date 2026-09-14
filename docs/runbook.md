@@ -114,11 +114,16 @@ JS 仅 hash 不同，说明源码与产物对应。
 
 | 变量 | 用途 |
 | --- | --- |
-| `AEMEATH_LLM_API_KEY` | 对话模型密钥 |
+| `AEMEATH_LLM_API_KEY` | 对话模型密钥（当前为本机 EasyCLIProxyAPI 的回环鉴权值） |
 | `AEMEATH_TTS_API_KEY` | 可选，改用 API TTS 时需要 |
 | `AEMEATH_EMBEDDING_API_KEY` | 记忆嵌入（配置 `providers.embedding` 后需要） |
 | `AEMEATH_EXTRACTION_API_KEY` | 记忆提取（配置 `providers.extraction` 后需要） |
 | `AEMEATH_VISION_API_KEY` | 屏幕理解（配置 `providers.vision` 后需要） |
+| `NO_PROXY` | 必须包含 `127.0.0.1`（对话/提取/视觉都走本机回环端点） |
+
+> 当前对话与记忆提取指向本机 EasyCLIProxyAPI（`http://127.0.0.1:8317/v1`，
+> `deepseek-v4.1-flash`），视觉同样走该端点（`gemini-3.8-flash-high`）。
+> 换供应商只改配置里的 `base_url` 与 `model`，环境变量名不变。
 
 Aemeath 扩展配置写在 `character_config.aemeath_config` 下（上游会忽略未知段落）：
 `data_dir`、`log_dir`、`memory`、`proactive`、`screen`、`providers`。

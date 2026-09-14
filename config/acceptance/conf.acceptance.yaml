@@ -1,12 +1,12 @@
-# Aemeath 首期运行配置（本机配置，不入源码版本管理）
+# Aemeath 验收运行配置
 #
 # 本文件是 Open-LLM-VTuber v1.2.1 的用户配置。Aemeath 的独立性通过以下方式保证：
 #   - 角色预设、数据、日志均指向 Aemeath 自己的位置，不写入上游目录
 #   - 不导入任何既有账号、历史或运行配置
 #
 # 密钥不写在本文件里：下面的 api_key 字段留空或填占位符，
-# 真实密钥通过环境变量注入（见 docs/configuration.md）。
-# 该文件被 .gitignore 排除，不会被提交。
+# 真实密钥通过环境变量注入（见 docs/runbook.md）。
+# 本文件**会**被提交（它是验收配置，只含变量名与占位符，不含密钥）；
 
 system_config:
   conf_version: 'v1.2.1'
@@ -73,15 +73,15 @@ character_config:
         segment_method: 'pysbd'
 
     llm_configs:
-      # 对话模型：真实供应商 DeepSeek（OpenAI 兼容接口）。
-      # 密钥从 AEMEATH_LLM_API_KEY 环境变量读取，不写在本文件里。
-      # 本机探测（2026-09-14）：DeepSeek 仅提供 deepseek-flash 与 deepseek-v4-pro。
+      # 对话模型：EasyCLIProxyAPI 本机代理（OpenAI 兼容接口）。
+      # 2026-09-14 从 DeepSeek 迁到该代理：对话与视觉统一走同一个本机端点，
+      # 密钥由代理自身管理，仅做本机回环鉴权。
       openai_compatible_llm:
-        base_url: 'https://api.deepseek.com/v1'
+        base_url: 'http://127.0.0.1:8317/v1'
         llm_api_key: '${AEMEATH_LLM_API_KEY}'
         organization_id: null
         project_id: null
-        model: 'deepseek-flash'
+        model: 'deepseek-v4.1-flash'
         temperature: 1.0
         # 用户输入优先打断；上游据此在记忆里插入中断标记
         interrupt_method: 'user'
@@ -201,8 +201,7 @@ character_config:
     # 未配置的能力状态为 disabled；已配置但初始化失败为 error，不会静默降级。
     #
     # 真实供应商可达性探测结果见 docs/acceptance.md：
-    #   conversation / extraction 使用 DeepSeek，已连通；
-    #   vision 走 EasyCLIProxyAPI (gemini-3.8-flash-high)；
+    #   conversation / extraction / vision 均走 EasyCLIProxyAPI（127.0.0.1:8317）；
     #   embedding 接入本机 LM Studio (text-embedding-bge-large-zh-v1.5, 1024 维)。
     providers:
       embedding:
@@ -216,8 +215,8 @@ character_config:
       extraction:
         enabled: true
         provider: 'openai_compatible'
-        base_url: 'https://api.deepseek.com/v1'
-        model: 'deepseek-flash'
+        base_url: 'http://127.0.0.1:8317/v1'
+        model: 'deepseek-v4.1-flash'
         api_key_env: 'AEMEATH_EXTRACTION_API_KEY'
         timeout_seconds: 60
       vision:

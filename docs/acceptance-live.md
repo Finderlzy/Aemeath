@@ -1,5 +1,12 @@
 # Aemeath 真实 API 与设备验收记录
 
+> **当前对话与提取供应商已变更（2026-09-14）**：本文以下章节记录的是
+> 当时使用 DeepSeek（`deepseek-flash`）的历史验收。项目现已把对话、记忆提取
+> 统一迁到本机 **EasyCLIProxyAPI**（`http://127.0.0.1:8317/v1`），模型为
+> `deepseek-v4.1-flash`；视觉仍为 `gemini-3.8-flash-high`。迁移后的连通实测见
+> [下方新增小节](#十供应商迁移复测2026-09-14)。历史表格保留原样，代表当时的
+> 实测事实，不得改写成迁移后的结果。
+
 > 2026-09-13 独立复核发现延迟来源、替身证据和试用时长缺口；最新结论见 [验收复核](acceptance.md#十四独立整体验收复核2026-09-13e41cb55)，历史“全部闭环”表述不再作为当前终态。
 >
 > 2026-09-13 后续修复已补齐其中三项：长期记忆状态语义（#5）、延迟采样可信度与现场语音/停止采录（#6）均已收口关闭，真实浏览器端到端链路实测见 [收口推进记录](acceptance.md#十五首期验收缺口修复与收口推进记录2026-09-13)。本节历史表格中的 23 个 `client_playback_start_ms` 样本来源与 22 个 12.5 ms 停止样本仍属**待核**，不作为有效样本引用。
@@ -397,3 +404,45 @@ GPT-SoVITS 接入后当前为 **330 项**，见 [验收记录第九节](acceptan
 功能侧另有四项阻塞，均由本轮真实链路验收修出并已加回归测试：
 回复被丢弃、SQLite 连接泄漏、客户端回执从未发送、指标文件只写不读。
 其中第一项意味着对话功能在此之前从未真正工作过。
+
+---
+
+## 九、供应商迁移复测（2026-09-14）
+
+对话与记忆提取从 DeepSeek 迁到本机 EasyCLIProxyAPI（`http://127.0.0.1:8317/v1`）。
+**本节是迁移后的实测结果，与上文历史章节的供应商无关，不得互相引用。**
+
+配置变更（`config/acceptance/conf.acceptance.yaml`）：
+
+| 能力 | 变更前 | 变更后 |
+| --- | --- | --- |
+| conversation | `https://api.deepseek.com/v1` / `deepseek-flash` | `http://127.0.0.1:8317/v1` / `deepseek-v4.1-flash` |
+| extraction | `https://api.deepseek.com/v1` / `deepseek-flash` | `http://127.0.0.1:8317/v1` / `deepseek-v4.1-flash` |
+| vision | 不变 | `http://127.0.0.1:8317/v1` / `gemini-3.8-flash-high` |
+
+命令：
+
+```powershell
+. .\scripts\acceptance-env.ps1
+.\vendor\Open-LLM-VTuber\.venv\Scripts\python.exe scripts\check_config.py --live
+```
+
+实测结果（`scripts/check_config.py --live`）：
+
+| 能力 | 配置 | 可达 | 可用 | 证据 |
+| --- | --- | --- | --- | --- |
+| conversation | EasyCLIProxyAPI / `deepseek-v4.1-flash` | 是 | **是** | 流式返回 41 字符中文 |
+| extraction | EasyCLIProxyAPI / `deepseek-v4.1-flash` | 是 | **是** | 提取 2 条事实，2 条带可定位证据 |
+| vision | EasyCLIProxyAPI / `gemini-3.8-flash-high` | 是 | **是** | 正确读出屏幕测试标记 |
+| capture | 本地 mss + pygetwindow | 是 | **是** | 取景 1936x1048 |
+| asr | 本地 sherpa SenseVoice | 是 | **是** | 转写成功 |
+| embedding | 本机 LM Studio `127.0.0.1:1234` | 否 | 否 | 服务未启动（与本次迁移无关） |
+| tts | 本机 GPT-SoVITS `127.0.0.1:9880` | 否 | 否 | 服务未启动（与本次迁移无关） |
+
+**结论**：本次迁移的三项（对话、提取、视觉）全部连通可用；嵌入与 TTS 的失败
+是这两个本地服务当时未运行，不是配置错误——探针按设计报 `reachable: false`，
+没有静默降级。
+
+**注意（回环必须绕过代理）**：新端点只监听 `127.0.0.1`，因此
+`NO_PROXY` 必须包含 `127.0.0.1`，否则请求会被送进本机外部代理而失败。
+`scripts/acceptance-env.ps1` 已保留该设置。

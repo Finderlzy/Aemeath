@@ -158,11 +158,11 @@ Aemeath 首期正式语音方案为本地 GPT-SoVITS（`http://127.0.0.1:9880/tt
 | --- | --- | --- | --- |
 | 交互 Agent | `agent.agent_type` | `aemeath_agent` | - |
 | 聊天模型 (LLM) | `agent.llm.provider` | `openai_compatible_llm` | - |
-| 聊天端点 | `agent.llm.base_url` | 如 `https://api.deepseek.com/v1` | - |
-| 聊天模型名 | `agent.llm.model` | 如 `deepseek-chat` | - |
+| 聊天端点 | `agent.llm.base_url` | 如 `http://127.0.0.1:8317/v1` | - |
+| 聊天模型名 | `agent.llm.model` | 如 `deepseek-v4.1-flash` | - |
 | 聊天密钥 | `agent.llm.api_key` | 可配置或置空读取环境变量 | `$env:AEMEATH_LLM_API_KEY` |
-| 记忆提取模型 | `aemeath.extraction.base_url` | 如 `https://api.deepseek.com/v1` | - |
-| 记忆提取模型名 | `aemeath.extraction.model` | 如 `deepseek-chat` | - |
+| 记忆提取模型 | `aemeath.extraction.base_url` | 如 `http://127.0.0.1:8317/v1` | - |
+| 记忆提取模型名 | `aemeath.extraction.model` | 如 `deepseek-v4.1-flash` | - |
 | 记忆提取密钥 | `aemeath.extraction.api_key_env` | `AEMEATH_EXTRACTION_API_KEY` | `$env:AEMEATH_EXTRACTION_API_KEY` |
 | 本地嵌入端点 | `aemeath.embedding.base_url` | `http://127.0.0.1:1234/v1` | - |
 | 本地嵌入模型名 | `aemeath.embedding.model` | `text-embedding-bge-large-zh-v1.5` | - |
@@ -173,15 +173,21 @@ Aemeath 首期正式语音方案为本地 GPT-SoVITS（`http://127.0.0.1:9880/tt
 | 本地 ASR | `asr_model` | `sherpa_onnx_asr` | - |
 | 本地 TTS | `tts_model` | `gpt_sovits_tts` | - |
 
+> 对话、记忆提取与视觉可以共用同一个 OpenAI 兼容端点。当前实际配置三者都指向
+> 本机 EasyCLIProxyAPI（`http://127.0.0.1:8317/v1`）：对话与提取用
+> `deepseek-v4.1-flash`，视觉用 `gemini-3.8-flash-high`。该端点只监听回环，
+> 因此 `NO_PROXY` 必须包含 `127.0.0.1`，否则回环流量会被送进外部代理而失败。
+
 ### 2. 注入环境变量与配置健康检查
 
 ```powershell
 # 注入实际模型凭据
-$env:AEMEATH_LLM_API_KEY = "sk-..."
-$env:AEMEATH_EXTRACTION_API_KEY = "sk-..."
+$env:AEMEATH_LLM_API_KEY = "..."          # 对话端点密钥
+$env:AEMEATH_EXTRACTION_API_KEY = "..."   # 记忆提取端点密钥
 $env:AEMEATH_EMBEDDING_API_KEY = "lm-studio"
 $env:AEMEATH_VISION_API_KEY = "..."
 $env:AEMEATH_TLS_INSECURE = "1" # 如使用代理自签证书需开启
+$env:NO_PROXY = "127.0.0.1,localhost" # 回环端点必须绕过代理
 
 # 运行配置静态与端点健康探针
 .\vendor\Open-LLM-VTuber\.venv\Scripts\python.exe scripts\check_config.py --live

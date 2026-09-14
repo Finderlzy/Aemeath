@@ -73,14 +73,19 @@ character_config:
         segment_method: 'pysbd'
 
     llm_configs:
-      # 对话模型：OpenAI 兼容接口。首期未确定供应商，替换 provider/base_url/model 即可。
+      # 对话模型：OpenAI 兼容接口。换供应商只改 base_url 与 model，变量名不变。
       # 真实密钥从 AEMEATH_LLM_API_KEY 环境变量读取（见 aemeath/config）。
+      #
+      # 当前实际使用的取值（见 config/acceptance/conf.acceptance.yaml）：
+      #   base_url: 'http://127.0.0.1:8317/v1'   本机 EasyCLIProxyAPI
+      #   model:    'deepseek-v4.1-flash'
+      # 若指向回环端点，必须设 NO_PROXY 包含 127.0.0.1，否则会被外部代理拦截。
       openai_compatible_llm:
-        base_url: 'https://api.example.invalid/v1'
+        base_url: 'http://127.0.0.1:8317/v1'
         llm_api_key: '${AEMEATH_LLM_API_KEY}'
         organization_id: null
         project_id: null
-        model: 'replace-me'
+        model: 'deepseek-v4.1-flash'
         temperature: 1.0
         # 用户输入优先打断；上游据此在记忆里插入中断标记
         interrupt_method: 'user'

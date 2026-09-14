@@ -93,9 +93,19 @@ def install_management_routes(app, config_path=None) -> None:
             )
         return None
 
+    #: One service for the life of the process.
+    #:
+    #: ``ConfigService`` records the revision the process started with, which is
+    #: the definition of "what is running". Building a new service per request
+    #: would re-read that revision after every save, making the saved and
+    #: running revisions equal — the UI would then report a change as already in
+    #: effect when no engine has adopted it. The revision is therefore captured
+    #: once, here, at import/mount time.
+    service = ConfigService(config_path)
+
     def _service() -> ConfigService:
         """The service bound to the authoritative config."""
-        return ConfigService(config_path)
+        return service
 
     @router.get("/overview")
     async def overview(request: Request):

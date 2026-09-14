@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -278,13 +279,45 @@ class ConfigService:
             return [FieldError(field="model", message="模型名称不能为空。")]
         return []
 
-    def _validate_document(self, document: Dict[str, Any]) -> List[FieldError]:
-        """Validate a candidate through the real upstream schema.
+    @staticmethod
+    def _dump_document(document: Dict[str, Any]) -> str:
+        """Serialise a config document to the exact text that will be written.
 
-        The server validates the deployed document at startup and refuses to
-        boot when it fails. Running the same validator here means a save can
-        never leave a config that will not start — which is the failure the
-        "illegal fields must not damage the old file" criterion is about.
+        ``${VAR}`` references are re-quoted deliberately. ``yaml.safe_dump``
+        emits them as bare scalars (``llm_api_key: ${AEMEATH_LLM_API_KEY}``)
+        because YAML does not need quotes there — but upstream's ``read_yaml``
+        substitutes variables into the **text** and only then parses, so a bare
+        placeholder whose value is all digits becomes an ``int`` and fails the
+        schema that requires ``str``. The original files in this repository
+        quote those fields for exactly this reason; re-serialising must not
+        silently drop that quoting and produce a config that will not start.
+
+        Returns:
+            YAML text with every ``${VAR}`` reference kept inside single quotes.
+        """
+        text = yaml.safe_dump(document, allow_unicode=True)
+        # Only *unquoted* occurrences are rewritten; an already-quoted
+        # reference must not be double-quoted.
+        return re.sub(
+            r"^(\s*[\w-]+:\s*)(\$\{\w+\})\s*$",
+            r"\1'\2'",
+            text,
+            flags=re.MULTILINE,
+        )
+
+    def _validate_text(self, text: str) -> List[FieldError]:
+        """Validate config text through the real upstream schema.
+
+        Validation runs on the *text* the server would read, not on the parsed
+        document, because ``${VAR}`` substitution happens on text: a document
+        that is fine in memory can still fail once placeholders are replaced
+        with their values.
+
+        Args:
+            text: Exact config file content.
+
+        Returns:
+            Field errors, empty when the config is valid.
         """
         import tempfile as _tempfile
 
@@ -294,9 +327,7 @@ class ConfigService:
         os.close(handle)
         candidate = Path(name)
         try:
-            candidate.write_text(
-                yaml.safe_dump(document, allow_unicode=True), encoding="utf-8"
-            )
+            candidate.write_text(text, encoding="utf-8")
             try:
                 validate_config(read_yaml(str(candidate)))
             except Exception as exc:
@@ -313,12 +344,63 @@ class ConfigService:
             except OSError:  # pragma: no cover
                 pass
 
+    def _validate_document(self, document: Dict[str, Any]) -> List[FieldError]:
+        """Validate a document, serialising it the way the writer would."""
+        return self._validate_text(self._dump_document(document))
+
     # ------------------------------------------------------------------
     # Writing
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _set_scalar(text: str, key: str, value: str, *, occurrence: int = 0) -> str:
+        """Replace one scalar value in the config text, in place.
+
+        The file is documentation: it carries 40-odd comment lines explaining
+        what each setting does, and it is under version control. Re-serialising
+        the parsed document would silently delete every one of those comments
+        and reflow the entire file, so a one-field change is applied as a
+        targeted text edit instead.
+
+        Args:
+            text: The config file's current text.
+            key: The YAML key to update (matched as a whole key, so ``model``
+                does not match ``live2d_model_name``).
+            value: The new scalar value, written quoted.
+            occurrence: Which match to update when the key repeats. Counting
+                from zero, in file order.
+
+        Returns:
+            The updated text. When the key is absent the text is returned
+            unchanged, and the caller reports that as an error rather than
+            guessing where to insert it.
+        """
+        pattern = re.compile(
+            rf"^(\s*{re.escape(key)}:\s*)(.*?)(\s*)$", re.MULTILINE
+        )
+        matches = list(pattern.finditer(text))
+        if occurrence >= len(matches):
+            return text
+        match = matches[occurrence]
+        # Single-quote so a numeric-looking value stays a string, matching how
+        # the surrounding fields are written.
+        replacement = f"{match.group(1)}'{value}'{match.group(3)}"
+        return text[: match.start()] + replacement + text[match.end() :]
+
     def _atomic_write(self, document: Dict[str, Any]) -> Tuple[bool, str]:
-        """Write the document atomically.
+        """Write a whole document atomically.
+
+        Used where the change genuinely rewrites a section (the persona block).
+        For single-value edits prefer :meth:`_atomic_write_text`, which keeps the
+        file's comments.
+        """
+        return self._atomic_write_text(self._dump_document(document))
+
+    def _atomic_write_text(self, text: str) -> Tuple[bool, str]:
+        """Write config text atomically.
+
+        Args:
+            text: The exact file content to write.
 
         Returns:
             ``(ok, message)``. On failure the destination is untouched: the
@@ -326,7 +408,6 @@ class ConfigService:
             failure while writing cannot truncate the existing config.
         """
         path = self.config_path
-        text = yaml.safe_dump(document, allow_unicode=True)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             handle, name = tempfile.mkstemp(
@@ -436,27 +517,45 @@ class ConfigService:
                 ],
             )
 
-        errors = self._validate_document(candidate)
-        if errors:
-            return self._save_result(ok=False, errors=errors)
-
         if candidate == document:
             # Nothing changed: report success without claiming a restart.
             return self._save_result(ok=True, message="配置未变化。")
 
-        # Persist the credential *after* validation, so a rejected save leaves
-        # no trace of the submitted key anywhere.
-        if api_key:
-            save_credential(MANAGED_API_KEY_ENV, api_key)
+        # Apply the change to the existing text rather than re-serialising the
+        # document, so the file's comments and layout survive the edit.
+        provider_name = self._provider_name(document) or ""
+        edited = self._surgical_model_edit(
+            self.read_text(), provider_name, base_url, model, api_key
+        )
+        if edited is None:
+            return self._save_result(
+                ok=False,
+                errors=[
+                    FieldError(
+                        field="provider",
+                        message="未能在配置文件中定位对话模型连接，未做修改。",
+                    )
+                ],
+            )
 
-        ok, message = self._atomic_write(candidate)
+        # Validate the text that will actually be written, not the in-memory
+        # document: substitution of ${VAR} happens on text, and the two can
+        # disagree. This is also the gate that keeps a bad save off disk.
+        errors = self._validate_text(edited)
+        if errors:
+            return self._save_result(ok=False, errors=errors)
+
+        ok, message = self._atomic_write_text(edited)
         if not ok:
             return self._save_result(ok=False, message=message)
 
+        # Persist the credential *after* the config is safely written, so a
+        # rejected save leaves no trace of the submitted key anywhere.
+        if api_key:
+            save_credential(MANAGED_API_KEY_ENV, api_key)
+
         logger.info("Conversation model updated through the management API.")
-        return self._save_result(
-            ok=True, message="已保存，重启后生效。"
-        )
+        return self._save_result(ok=True, message="已保存，重启后生效。")
 
     def _with_model(
         self,
@@ -502,6 +601,91 @@ class ConfigService:
             # environment, where the runtime looks it up.
             provider_block["llm_api_key"] = "${%s}" % MANAGED_API_KEY_ENV
         return candidate
+
+    def _provider_name(self, document: Dict[str, Any]) -> Optional[str]:
+        """Name of the ``llm_configs`` entry the active agent selects.
+
+        Following the same indirection ``aemeath/config.py`` uses keeps the
+        management surface editing the connection conversations really use.
+        """
+        character = document.get("character_config")
+        if not isinstance(character, dict):
+            return None
+        agent_config = character.get("agent_config")
+        if not isinstance(agent_config, dict):
+            return None
+        settings = agent_config.get("agent_settings") or {}
+        chosen = agent_config.get("conversation_agent_choice")
+        block = settings.get(chosen) if chosen else None
+        if not isinstance(block, dict):
+            block = settings.get("aemeath_agent")
+        if not isinstance(block, dict):
+            return None
+        name = block.get("llm_provider")
+        pool = agent_config.get("llm_configs")
+        if not name or not isinstance(pool, dict) or not isinstance(pool.get(name), dict):
+            return None
+        return str(name)
+
+    def _surgical_model_edit(
+        self,
+        text: str,
+        provider_name: str,
+        base_url: str,
+        model: str,
+        api_key: Optional[str],
+    ) -> Optional[str]:
+        """Apply the model change to the config text, keeping everything else.
+
+        Only the keys inside the selected ``llm_configs.<provider>`` block are
+        rewritten. Comments, ordering and blank lines elsewhere in the file are
+        preserved, which full re-serialisation would destroy.
+
+        Returns:
+            The updated text, or ``None`` when the provider block cannot be
+            located — the caller reports that instead of writing a guess.
+        """
+        lines = text.splitlines(keepends=True)
+
+        # Find the provider block header, then its indented body.
+        header = re.compile(rf"^(\s*){re.escape(provider_name)}:\s*$")
+        start = None
+        header_indent = ""
+        for index, line in enumerate(lines):
+            match = header.match(line.rstrip("\r\n"))
+            if match:
+                start = index
+                header_indent = match.group(1)
+                break
+        if start is None:
+            return None
+
+        end = len(lines)
+        for index in range(start + 1, len(lines)):
+            stripped = lines[index].rstrip("\r\n")
+            if not stripped.strip():
+                continue
+            indent = len(stripped) - len(stripped.lstrip())
+            if indent <= len(header_indent):
+                end = index
+                break
+
+        replacements = {"base_url": base_url.strip(), "model": model.strip()}
+        if api_key:
+            replacements["llm_api_key"] = "${%s}" % MANAGED_API_KEY_ENV
+
+        changed = False
+        for index in range(start + 1, end):
+            line = lines[index]
+            body = line.rstrip("\r\n")
+            ending = line[len(body):] or "\n"
+            for key, value in replacements.items():
+                key_match = re.match(rf"^(\s*{re.escape(key)}:\s*)(.*)$", body)
+                if key_match:
+                    lines[index] = f"{key_match.group(1)}'{value}'{ending}"
+                    changed = True
+                    break
+        return "".join(lines) if changed else None
 
     def save_persona(
         self,

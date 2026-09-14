@@ -388,6 +388,178 @@ async def test_running_revision_reflects_the_startup_snapshot(manage_env):
     assert service.overview()["running_revision"] == started_with
 
 
+async def test_the_running_revision_survives_separate_requests(manage_env):
+    """The revision is captured once per process, not once per request.
+
+    The routes build one service for the process. If a fresh service were built
+    for every request, "running" would be re-read from disk after each save and
+    would always equal "saved" — the UI would then report a change as already in
+    effect even though no engine had adopted it. Reusing one service, as the
+    other tests do, cannot catch that; this test drives the HTTP surface instead.
+    """
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from aemeath.management.routes import install_management_routes
+
+    app = FastAPI()
+    install_management_routes(app, config_path=manage_env.path)
+    client = TestClient(app, client=("127.0.0.1", 12345))
+
+    before = client.get("/aemeath/manage/overview").json()
+    assert before["restart_required"] is False
+
+    saved = client.post(
+        "/aemeath/manage/model",
+        json={
+            "base_url": "https://api.changed.invalid/v1",
+            "model": "changed-model",
+            "expected_revision": before["saved_revision"],
+        },
+    )
+    assert saved.status_code == 200
+
+    after = client.get("/aemeath/manage/overview").json()
+    assert after["saved_revision"] != before["saved_revision"]
+    assert after["running_revision"] == before["running_revision"]
+    assert after["restart_required"] is True
+
+
+async def test_the_running_revision_is_stable_across_many_requests(manage_env):
+    """Reading repeatedly does not drift the running revision."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from aemeath.management.routes import install_management_routes
+
+    app = FastAPI()
+    install_management_routes(app, config_path=manage_env.path)
+    client = TestClient(app, client=("127.0.0.1", 12345))
+
+    revisions = {
+        client.get("/aemeath/manage/overview").json()["running_revision"]
+        for _ in range(5)
+    }
+    assert len(revisions) == 1
+
+
+async def test_a_save_preserves_the_configs_comments(manage_env):
+    """A save must not strip the documentation out of the config file.
+
+    The config is comment-heavy and version-controlled: it explains what each
+    setting does. Re-serialising the parsed document would delete every comment
+    and reflow the whole file, so a one-value change is applied as a targeted
+    text edit. This is the regression for exactly that failure.
+    """
+    document = manage_env.document()
+    document["character_config"]["_aemeath_test_comment_anchor"] = "x"
+    text = yaml.safe_dump(document, allow_unicode=True)
+    # Add comments the way the real file has them.
+    text = (
+        "# Aemeath test config\n"
+        "# a comment that must survive a save\n"
+        + text
+        + "# trailing comment\n"
+    )
+    manage_env.path.write_text(text, encoding="utf-8")
+
+    service = manage_env.service()
+    before_comments = [
+        line for line in manage_env.path.read_text(encoding="utf-8").splitlines()
+        if line.strip().startswith("#")
+    ]
+    assert before_comments
+
+    result = service.save_model(
+        base_url="https://api.changed.invalid/v1",
+        model="changed-model",
+        expected_revision=service.overview()["saved_revision"],
+    )
+    assert result["ok"] is True
+
+    after_text = manage_env.path.read_text(encoding="utf-8")
+    after_comments = [
+        line for line in after_text.splitlines() if line.strip().startswith("#")
+    ]
+    assert after_comments == before_comments
+    # And the change did land.
+    assert "changed-model" in after_text
+
+
+async def test_a_save_leaves_unrelated_lines_untouched(manage_env):
+    """Only the changed values are rewritten.
+
+    A full re-serialisation also reorders and reflows unrelated keys, which
+    makes every save look like a whole-file rewrite in version control.
+    """
+    service = manage_env.service()
+    before = manage_env.path.read_text(encoding="utf-8").splitlines()
+
+    service.save_model(
+        base_url="https://api.changed.invalid/v1",
+        model="changed-model",
+        expected_revision=service.overview()["saved_revision"],
+    )
+
+    after = manage_env.path.read_text(encoding="utf-8").splitlines()
+    assert len(after) == len(before)
+
+    differing = [
+        (old, new)
+        for old, new in zip(before, after)
+        if old != new
+    ]
+    # Exactly the two edited values, and nothing else.
+    assert len(differing) <= 3, f"too many lines changed: {differing}"
+    for old, new in differing:
+        assert old.split(":")[0].strip() in {"base_url", "model", "llm_api_key"}
+
+
+async def test_a_save_does_not_touch_sibling_provider_models(manage_env):
+    """Sibling connections keep their own ``model`` values.
+
+    The real config has several ``llm_configs`` entries plus embedding and
+    vision blocks, all with keys named ``base_url`` and ``model`` at the same
+    indentation as the conversation provider's. Editing by key name alone would
+    rewrite the embedding and vision endpoints too. The edit is therefore scoped
+    to the selected provider's block.
+    """
+    document = manage_env.document()
+    pool = document["character_config"]["agent_config"]["llm_configs"]
+    pool["embedding_like"] = {
+        "base_url": "http://127.0.0.1:1234/v1",
+        "model": "text-embedding-bge-large-zh-v1.5",
+        "llm_api_key": "lm-studio",
+    }
+    pool["vision_like"] = {
+        "base_url": "http://127.0.0.1:8317/v1",
+        "model": "gemini-3.8-flash-high",
+        "llm_api_key": "x",
+    }
+    _write_document(manage_env.path, document)
+
+    service = manage_env.service()
+    result = service.save_model(
+        base_url="https://api.changed.invalid/v1",
+        model="changed-model",
+        expected_revision=service.overview()["saved_revision"],
+    )
+    assert result["ok"] is True
+
+    after = manage_env.document()
+    after_pool = after["character_config"]["agent_config"]["llm_configs"]
+    assert after_pool["openai_compatible_llm"]["model"] == "changed-model"
+    assert (
+        after_pool["openai_compatible_llm"]["base_url"]
+        == "https://api.changed.invalid/v1"
+    )
+    # Unrelated connections are untouched.
+    assert after_pool["embedding_like"]["model"] == "text-embedding-bge-large-zh-v1.5"
+    assert after_pool["embedding_like"]["base_url"] == "http://127.0.0.1:1234/v1"
+    assert after_pool["vision_like"]["model"] == "gemini-3.8-flash-high"
+    assert after_pool["vision_like"]["base_url"] == "http://127.0.0.1:8317/v1"
+
+
 async def test_unchanged_save_does_not_claim_a_restart_is_needed(manage_env):
     """Re-saving identical values is not a pending change."""
     service = manage_env.service()

@@ -14,6 +14,7 @@ Mounted by the upstream patch at ``/aemeath/manage``. Three properties matter:
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -21,7 +22,18 @@ from fastapi import APIRouter, Body, Request
 from fastapi.responses import JSONResponse
 from loguru import logger
 
-from .schema import SaveModelRequest, SavePersonaRequest
+from .schema import (
+    Live2DSaveRequest,
+    MemoryCorrectRequest,
+    MemoryForgetRequest,
+    MemorySearchRequest,
+    RestoreRequest,
+    SaveModelRequest,
+    SavePersonaRequest,
+    VoiceApplyRequest,
+    VoiceAuditionRequest,
+    VoicePresetRequest,
+)
 from .service import ConfigService
 
 #: Route prefix, fixed by the v2 design (see docs/architecture.md).
@@ -150,6 +162,240 @@ def install_management_routes(app, config_path=None) -> None:
         if result.get("conflict"):
             return JSONResponse(status_code=409, content=result)
         return JSONResponse(status_code=422, content=result)
+
+    # ------------------------------------------------------------------
+    # Memory (V2-T02)
+    # ------------------------------------------------------------------
+
+    def _memory_service():
+        """Build the memory service on the runtime's authoritative store.
+
+        The store comes from the single process-wide runtime, so the page edits
+        exactly the database conversations write to. Building a second store
+        here would let the page report memories the running process cannot see.
+        """
+        from .memory_admin import MemoryAdminService
+
+        from ..runtime import get_runtime
+
+        runtime = get_runtime()
+        return MemoryAdminService(runtime.memory.store)
+
+    @router.post("/memory/search")
+    async def memory_search(
+        request: Request, payload: MemorySearchRequest = Body(...)
+    ):
+        """Search the local memory, distinguishing empty from unavailable."""
+        refused = _guard(request)
+        if refused is not None:
+            return refused
+        return await _memory_service().search(payload.query, limit=payload.limit)
+
+    @router.get("/memory/list")
+    async def memory_list(request: Request):
+        """Every memory, including ones the search index cannot reach."""
+        refused = _guard(request)
+        if refused is not None:
+            return refused
+        return _memory_service().list_all()
+
+    @router.get("/memory/{memory_id}/impact")
+    async def memory_impact(request: Request, memory_id: str):
+        """What removing this memory would actually do.
+
+        Read before the user acts so the wider cascading effect is never
+        discovered afterwards.
+        """
+        refused = _guard(request)
+        if refused is not None:
+            return refused
+        return _memory_service().describe_impact(memory_id)
+
+    @router.post("/memory/correct")
+    async def memory_correct(
+        request: Request, payload: MemoryCorrectRequest = Body(...)
+    ):
+        """Replace a memory's content."""
+        refused = _guard(request)
+        if refused is not None:
+            return refused
+        result = await _memory_service().correct(
+            memory_id=payload.memory_id, content=payload.content
+        )
+        return _respond(result)
+
+    @router.post("/memory/forget")
+    async def memory_forget(
+        request: Request, payload: MemoryForgetRequest = Body(...)
+    ):
+        """Forget one fact precisely.
+
+        A memory whose span cannot be located is not removed here; the response
+        asks for a selection instead of reporting a success that did not happen.
+        """
+        refused = _guard(request)
+        if refused is not None:
+            return refused
+        service = _memory_service()
+        impact = service.describe_impact(payload.memory_id)
+
+        # Removing the source messages is the wider operation; it only happens
+        # with the user's explicit acceptance of that impact.
+        if (
+            impact.get("mode") == "cascading"
+            and impact.get("removes_source_messages")
+            and not payload.confirm_cascading
+        ):
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "ok": False,
+                    "error": (
+                        "这条记忆没有可定位的原文片段，遗忘它会连同来源消息一起删除。"
+                        "确认后才会执行。"
+                    ),
+                    "needs_selection": [],
+                    "removed_fragments": [],
+                    "invalidated_derived": [],
+                    "impact": impact,
+                },
+            )
+
+        result = await service.forget(
+            payload.memory_id, fragments=payload.fragments
+        )
+        return _respond(result)
+
+    @router.get("/memory/backups")
+    async def memory_backups(request: Request):
+        """Backups available to restore."""
+        refused = _guard(request)
+        if refused is not None:
+            return refused
+        from ..config import load_config
+
+        directory = load_config().data_dir / "backups"
+        return {
+            "ok": True,
+            "error": "",
+            "backups": _memory_service().list_backups(directory),
+        }
+
+    @router.post("/memory/restore")
+    async def memory_restore(request: Request, payload: RestoreRequest = Body(...)):
+        """Restore a backup, with the warning that forgotten content may return."""
+        refused = _guard(request)
+        if refused is not None:
+            return refused
+        result = await _memory_service().restore(
+            Path(payload.backup_path), confirm=payload.confirm
+        )
+        return _respond(result)
+
+    # ------------------------------------------------------------------
+    # Voice (V2-T02)
+    # ------------------------------------------------------------------
+
+    def _voice_service():
+        """Build the voice service on the authoritative config."""
+        from .voices import VoiceService
+
+        return VoiceService(config_path)
+
+    @router.get("/voice/overview")
+    async def voice_overview(request: Request):
+        """Presets, the active one, and the configured engine."""
+        refused = _guard(request)
+        if refused is not None:
+            return refused
+        return _voice_service().overview()
+
+    @router.post("/voice/preset")
+    async def voice_create_preset(
+        request: Request, payload: VoicePresetRequest = Body(...)
+    ):
+        """Save a preset without activating it."""
+        refused = _guard(request)
+        if refused is not None:
+            return refused
+        result = _voice_service().create_preset(
+            name=payload.name,
+            api_url=payload.api_url,
+            ref_audio_path=payload.ref_audio_path,
+            prompt_text=payload.prompt_text,
+            text_lang=payload.text_lang,
+            prompt_lang=payload.prompt_lang,
+            text_split_method=payload.text_split_method,
+            batch_size=payload.batch_size,
+            media_type=payload.media_type,
+            streaming_mode=payload.streaming_mode,
+            expected_revision=payload.expected_revision,
+        )
+        return _respond(result)
+
+    @router.post("/voice/apply")
+    async def voice_apply(request: Request, payload: VoiceApplyRequest = Body(...)):
+        """Make a preset the active voice.
+
+        A preset that cannot work is refused before anything is written, so a
+        failed apply leaves the previous voice in place.
+        """
+        refused = _guard(request)
+        if refused is not None:
+            return refused
+        result = await _voice_service().apply(
+            payload.preset_id, expected_revision=payload.expected_revision
+        )
+        return _respond(result)
+
+    @router.post("/voice/audition")
+    async def voice_audition(
+        request: Request, payload: VoiceAuditionRequest = Body(...)
+    ):
+        """Synthesise a sample without applying the preset."""
+        refused = _guard(request)
+        if refused is not None:
+            return refused
+        return await _voice_service().audition(
+            payload.preset_id, text=payload.text
+        )
+
+    # ------------------------------------------------------------------
+    # Live2D (V2-T02)
+    # ------------------------------------------------------------------
+
+    def _live2d_service():
+        """Build the Live2D service on the authoritative config."""
+        from .live2d import Live2DService
+
+        return Live2DService(config_path)
+
+    @router.get("/live2d/overview")
+    async def live2d_overview(request: Request):
+        """Installed models, the active one, and what is missing.
+
+        Always returns the editable state, so a missing model cannot leave the
+        page blank and unusable.
+        """
+        refused = _guard(request)
+        if refused is not None:
+            return refused
+        return _live2d_service().overview()
+
+    @router.post("/live2d/save")
+    async def live2d_save(request: Request, payload: Live2DSaveRequest = Body(...)):
+        """Select a model and save its scale and position."""
+        refused = _guard(request)
+        if refused is not None:
+            return refused
+        result = await _live2d_service().save(
+            model_name=payload.model_name,
+            scale=payload.scale,
+            x_offset=payload.x_offset,
+            y_offset=payload.y_offset,
+            expected_revision=payload.expected_revision,
+        )
+        return _respond(result)
 
     app.include_router(router)
 

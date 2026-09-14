@@ -213,6 +213,29 @@ $env:NO_PROXY = "127.0.0.1,localhost" # 回环端点必须绕过代理
 - 客户端访问地址：<http://127.0.0.1:12393/>
 - 服务端 WebSocket 地址：`ws://127.0.0.1:12393/client-ws`
 
+### 管理界面
+
+服务运行中打开管理页（`?page=manage` 不可省略；不带参数打开的是角色页）：
+
+```
+http://127.0.0.1:12393/?page=manage
+```
+
+导航共六项：概览、模型、人设、声音、记忆、Live2D 与桌面。界面截图见
+[docs/images](docs/images/)，完整说明见 [启动手册 · 管理界面](docs/runbook.md#管理界面v2-t01)。
+
+- **模型／人设／概览**：读写权威配置 `config/conf.aemeath.yaml`，页面区分「已保存」与
+  「已生效」；凭据只存本机，接口不回显。
+- **声音**：示例与自定义预设卡片，可试听与应用。应用需要本地 GPT-SoVITS 服务在运行，
+  失败保留原音色。**当前没有爱弥斯的正式音色，列出的是示例音色。**
+- **记忆**：搜索、来源展示、纠正与精确遗忘。遗忘只移除目标片段，同一条消息里的其他
+  内容保留；若无法定位片段会要求你选定，不会谎称已遗忘。恢复备份前会提示可能恢复
+  已遗忘的内容。
+- **Live2D**：选择已安装模型并调整比例与位置；没有模型时页面给出明确说明，仍可完成
+  配置，聊天、语音与字幕不受影响。
+
+管理页与角色页是互斥的两个窗口：管理页不建立对话连接、不开麦克风、不播放音频。
+
 ---
 
 ## 七、自动化测试与验收套件
@@ -230,4 +253,17 @@ $env:NO_PROXY = "127.0.0.1,localhost" # 回环端点必须绕过代理
 # 4. 延迟采样审计与现场采录进度（口径见 docs/acceptance-guide.md D 节）
 .\vendor\Open-LLM-VTuber\.venv\Scripts\python.exe scripts\audit_latency_metrics.py
 .\vendor\Open-LLM-VTuber\.venv\Scripts\python.exe scripts\monitor_acceptance_progress.py
+```
+
+服务运行中可跑管理与记忆的端到端探针：
+
+```powershell
+# 管理 API 全端点可达性、错误码与凭据不回显
+.\vendor\Open-LLM-VTuber\.venv\Scripts\python.exe scripts\probe_management_v2.py
+
+# 记忆生命周期：写入 → 纠正 → 遗忘 → 重开数据库
+.\vendor\Open-LLM-VTuber\.venv\Scripts\python.exe scripts\probe_memory_lifecycle.py
+
+# 抓取管理界面六个页面的截图到 docs/images/
+.\vendor\Open-LLM-VTuber\.venv\Scripts\python.exe scripts\capture_manage_pages.py
 ```

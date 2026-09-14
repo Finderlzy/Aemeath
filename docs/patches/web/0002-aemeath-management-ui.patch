@@ -45,19 +45,318 @@ index 6bb1222..e94cc73 100644
    return (
      <ChakraProvider value={defaultSystem}>
        {/* ModeProvider needs to wrap AppContent to provide mode to getGlobalStyles */}
-diff --git a/src/renderer/src/components/aemeath/manage-page.tsx b/src/renderer/src/components/aemeath/manage-page.tsx
+diff --git a/src/renderer/src/components/aemeath/live2d-page.tsx b/src/renderer/src/components/aemeath/live2d-page.tsx
 new file mode 100644
-index 0000000..04975c7
+index 0000000..c6b033a
 --- /dev/null
-+++ b/src/renderer/src/components/aemeath/manage-page.tsx
-@@ -0,0 +1,397 @@
++++ b/src/renderer/src/components/aemeath/live2d-page.tsx
+@@ -0,0 +1,292 @@
 +/* eslint-disable @typescript-eslint/no-explicit-any */
 +/**
-+ * Aemeath management window: overview, model and persona.
++ * Live2D configuration page (v2 task V2-T02).
 + *
-+ * The first management loop (v2 task V2-T01). Three pages, one rule running
-+ * through all of them: **what the user sees must be what is really configured,
-+ * and "saved" must never be shown as "in effect"**.
++ * The governing rule is that **a missing model is a state, not a blank page**
++ * (acceptance A6). There is no official Aemeath Live2D model yet, so on a fresh
++ * machine this page will usually have nothing to show. It must therefore:
++ *
++ * * explain what is missing and what to do about it, rather than rendering an
++ *   empty list that looks like a broken page;
++ * * keep the configuration editable anyway, so the user is not locked out of
++ *   the settings just because the assets are absent;
++ * * never present the bundled placeholder as her real model (V2-08).
++ *
++ * Scale and position are written to `model_dict.json`, which the renderer
++ * fetches; the selected model is written to the authoritative config. The page
++ * shows both locations so a user debugging a load failure can look in the right
++ * place.
++ */
++import { useCallback, useEffect, useState } from 'react';
++import { Box, Button, Heading, Input, Text } from '@chakra-ui/react';
++
++import {
++  fetchLive2D,
++  saveLive2D,
++  type Live2DModel,
++  type Live2DOverviewResponse,
++} from '../../services/aemeath-management';
++
++interface Notice {
++  kind: 'ok' | 'error' | 'info';
++  text: string;
++}
++
++const NOTICE_COLOR: Record<Notice['kind'], string> = {
++  ok: 'green.300',
++  error: 'red.300',
++  info: 'blue.200',
++};
++
++export default function Live2DPage(): JSX.Element {
++  const [data, setData] = useState<Live2DOverviewResponse | null>(null);
++  const [loadError, setLoadError] = useState('');
++  const [notice, setNotice] = useState<Notice | null>(null);
++  const [busy, setBusy] = useState(false);
++
++  const [selected, setSelected] = useState('');
++  const [scale, setScale] = useState('1');
++  const [xOffset, setXOffset] = useState('0');
++  const [yOffset, setYOffset] = useState('0');
++
++  const applyOverview = useCallback((overview: Live2DOverviewResponse) => {
++    setData(overview);
++    setSelected(overview.active_model);
++    setScale(String(overview.active?.scale ?? 1));
++    setXOffset(String(overview.active?.x_offset ?? 0));
++    setYOffset(String(overview.active?.y_offset ?? 0));
++  }, []);
++
++  const load = useCallback(async () => {
++    try {
++      applyOverview(await fetchLive2D());
++      setLoadError('');
++    } catch (error) {
++      setData(null);
++      setLoadError(error instanceof Error ? error.message : String(error));
++    }
++  }, [applyOverview]);
++
++  useEffect(() => {
++    void load();
++  }, [load]);
++
++  const choose = (model: Live2DModel) => {
++    setSelected(model.name);
++    setScale(String(model.scale ?? 1));
++    setXOffset(String(model.x_offset ?? 0));
++    setYOffset(String(model.y_offset ?? 0));
++  };
++
++  const save = async () => {
++    setBusy(true);
++    setNotice(null);
++    try {
++      const result = await saveLive2D({
++        modelName: selected,
++        scale: Number(scale),
++        xOffset: Number(xOffset),
++        yOffset: Number(yOffset),
++        expectedRevision: '',
++      });
++      if (result.ok) {
++        setNotice({
++          kind: 'ok',
++          text: '已保存。角色窗口重新加载后使用新的模型与位置。',
++        });
++      } else {
++        setNotice({ kind: 'error', text: result.error || '保存失败。' });
++      }
++      await load();
++    } catch (error) {
++      setNotice({
++        kind: 'error',
++        text: error instanceof Error ? error.message : String(error),
++      });
++    } finally {
++      setBusy(false);
++    }
++  };
++
++  const hasModels = Boolean(data?.models.length);
++
++  return (
++    <Box maxWidth="900px">
++      <Heading size="md" marginBottom="2">
++        Live2D 与桌面
++      </Heading>
++      <Text fontSize="sm" color="whiteAlpha.800" marginBottom="4">
++        选择角色模型并调整比例与位置。缺模型不影响聊天、语音与字幕。
++      </Text>
++
++      {loadError && (
++        <Box
++          background="red.900"
++          borderWidth="1px"
++          borderColor="red.400"
++          padding="3"
++          marginBottom="4"
++          borderRadius="md"
++        >
++          <Text fontWeight="bold">无法读取 Live2D 配置</Text>
++          <Text fontSize="sm">{loadError}</Text>
++          <Button size="sm" marginTop="2" onClick={() => void load()}>
++            重试
++          </Button>
++        </Box>
++      )}
++
++      {notice && (
++        <Box
++          background="blackAlpha.400"
++          borderWidth="1px"
++          borderColor={NOTICE_COLOR[notice.kind]}
++          padding="3"
++          marginBottom="4"
++          borderRadius="md"
++        >
++          <Text fontSize="sm">{notice.text}</Text>
++        </Box>
++      )}
++
++      {/*
++        A missing or unusable model is stated here, in the page body, so the
++        user always gets an explanation. The form below stays rendered either
++        way — being unable to see the model is not a reason to be unable to
++        configure it.
++      */}
++      {data && !data.ok && data.error && (
++        <Box
++          background="orange.900"
++          borderWidth="1px"
++          borderColor="orange.300"
++          padding="3"
++          marginBottom="4"
++          borderRadius="md"
++        >
++          <Text fontWeight="bold">模型不可用</Text>
++          <Text fontSize="sm">{data.error}</Text>
++          <Text fontSize="xs" marginTop="1" color="whiteAlpha.800">
++            聊天、语音和字幕仍然可用；只有角色形象无法显示。
++          </Text>
++        </Box>
++      )}
++
++      {data && data.ok && !data.active_model_available && data.active_model && (
++        <Box
++          background="orange.900"
++          borderWidth="1px"
++          borderColor="orange.300"
++          padding="3"
++          marginBottom="4"
++          borderRadius="md"
++        >
++          <Text fontSize="sm">
++            当前配置的模型「{data.active_model}」在本机没有找到资源。
++          </Text>
++        </Box>
++      )}
++
++      <Heading size="sm" marginBottom="2">
++        已安装的模型
++      </Heading>
++
++      {data && !hasModels && (
++        <Box
++          borderWidth="1px"
++          borderColor="whiteAlpha.300"
++          borderRadius="md"
++          padding="3"
++          marginBottom="4"
++        >
++          <Text fontSize="sm">本机还没有可用的 Live2D 模型。</Text>
++          <Text fontSize="xs" color="whiteAlpha.700" marginTop="1">
++            把包含 .model3.json 的模型目录放到模型目录后刷新本页：
++          </Text>
++          <Text fontSize="xs" color="whiteAlpha.600" marginTop="1">
++            {data.models_root}
++          </Text>
++        </Box>
++      )}
++
++      {data?.models.map((model) => (
++        <Box
++          key={model.name}
++          borderWidth="1px"
++          borderColor={selected === model.name ? 'green.300' : 'whiteAlpha.300'}
++          borderRadius="md"
++          padding="3"
++          marginBottom="2"
++          cursor="pointer"
++          onClick={() => choose(model)}
++        >
++          <Text fontSize="sm" fontWeight="bold">
++            {model.label || model.name}
++          </Text>
++          {model.is_placeholder && (
++            <Text fontSize="xs" color="orange.200">
++              示例模型，不是爱弥斯的正式模型
++            </Text>
++          )}
++          {model.description && (
++            <Text fontSize="xs" color="whiteAlpha.700" marginTop="1">
++              {model.description}
++            </Text>
++          )}
++          <Text fontSize="xs" color="whiteAlpha.600" marginTop="1">
++            比例 {model.scale}，水平 {model.x_offset}，垂直 {model.y_offset}
++          </Text>
++        </Box>
++      ))}
++
++      {data && (
++        <Box marginTop="4">
++          <Heading size="sm" marginBottom="2">
++            比例与位置
++          </Heading>
++
++          <Text fontSize="sm" marginBottom="1">
++            比例
++          </Text>
++          <Input
++            value={scale}
++            onChange={(e) => setScale(e.target.value)}
++            marginBottom="3"
++          />
++
++          <Text fontSize="sm" marginBottom="1">
++            水平偏移
++          </Text>
++          <Input
++            value={xOffset}
++            onChange={(e) => setXOffset(e.target.value)}
++            marginBottom="3"
++          />
++
++          <Text fontSize="sm" marginBottom="1">
++            垂直偏移
++          </Text>
++          <Input
++            value={yOffset}
++            onChange={(e) => setYOffset(e.target.value)}
++            marginBottom="3"
++          />
++
++          <Text fontSize="xs" color="whiteAlpha.600" marginBottom="3">
++            模型目录：{data.models_root}
++            <br />
++            模型字典：{data.model_dict_path}
++          </Text>
++
++          <Button
++            colorPalette="blue"
++            disabled={busy || !selected || !hasModels}
++            onClick={() => void save()}
++          >
++            保存
++          </Button>
++        </Box>
++      )}
++    </Box>
++  );
++}
+diff --git a/src/renderer/src/components/aemeath/manage-page.tsx b/src/renderer/src/components/aemeath/manage-page.tsx
+new file mode 100644
+index 0000000..e166081
+--- /dev/null
++++ b/src/renderer/src/components/aemeath/manage-page.tsx
+@@ -0,0 +1,409 @@
++/* eslint-disable @typescript-eslint/no-explicit-any */
++/**
++ * Aemeath management window.
++ *
++ * V2-T01 delivered the first management loop (overview, model, persona);
++ * V2-T02 adds voice, memory and Live2D. One rule runs through all of them:
++ * **what the user sees must be what is really configured, and "saved" must
++ * never be shown as "in effect"**.
 + *
 + * The component reads the backend overview on mount and after every save, so
 + * the displayed revision always comes from the file rather than from optimistic
@@ -79,13 +378,19 @@ index 0000000..04975c7
 +  type FieldError,
 +  type OverviewResponse,
 +} from '../../services/aemeath-management';
++import Live2DPage from './live2d-page';
++import MemoryPage from './memory-page';
++import VoicePage from './voice-page';
 +
-+type Page = 'overview' | 'model' | 'persona';
++type Page = 'overview' | 'model' | 'persona' | 'voice' | 'memory' | 'live2d';
 +
 +const NAV: { id: Page; label: string }[] = [
 +  { id: 'overview', label: '概览' },
 +  { id: 'model', label: '模型' },
 +  { id: 'persona', label: '人设' },
++  { id: 'voice', label: '声音' },
++  { id: 'memory', label: '记忆' },
++  { id: 'live2d', label: 'Live2D' },
 +];
 +
 +/** Banner describing the outcome of the last action. */
@@ -444,16 +749,879 @@ index 0000000..04975c7
 +            </Button>
 +          </Box>
 +        )}
++        {page === 'voice' && <VoicePage />}
++
++        {page === 'memory' && <MemoryPage />}
++
++        {page === 'live2d' && <Live2DPage />}
 +      </Box>
 +    </Flex>
 +  );
 +}
+diff --git a/src/renderer/src/components/aemeath/memory-page.tsx b/src/renderer/src/components/aemeath/memory-page.tsx
+new file mode 100644
+index 0000000..aacd81f
+--- /dev/null
++++ b/src/renderer/src/components/aemeath/memory-page.tsx
+@@ -0,0 +1,512 @@
++/* eslint-disable @typescript-eslint/no-explicit-any */
++/**
++ * Memory management page (v2 task V2-T02).
++ *
++ * Three rules from the acceptance criteria shape this screen:
++ *
++ * 1. **"No memories" and "search is broken" are different things.** The backend
++ *    reports `available` separately from `ok`; this page renders an unavailable
++ *    index as a stated failure with a retry, never as an empty list. Showing a
++ *    retrieval outage as "you have no memories" is the specific confusion the
++ *    criterion forbids.
++ * 2. **The impact of a removal is shown before it happens.** `delete_memory()`
++ *    cascades into the source messages while a precise `forget()` removes only
++ *    the located span. The page fetches the impact first and, when the wider
++ *    operation is the only one available, requires an explicit confirmation
++ *    instead of quietly deleting more than the user asked for.
++ * 3. **A removal that did not happen is not reported as done.** When the span
++ *    cannot be located the backend returns `needs_selection`; the page shows
++ *    the source messages and explains that nothing was removed.
++ *
++ * Restoring a backup warns first, because a backup taken before a forgetting
++ * can bring that content back.
++ */
++import { useCallback, useEffect, useState } from 'react';
++import { Box, Button, Flex, Heading, Input, Text, Textarea } from '@chakra-ui/react';
++
++import {
++  correctMemory,
++  fetchBackups,
++  fetchMemories,
++  fetchMemoryImpact,
++  forgetMemory,
++  restoreBackup,
++  ManagementError,
++  searchMemories,
++  type BackupEntry,
++  type MemoryImpact,
++  type MemoryItemView,
++  type MemoryListResponse,
++  type MemorySource,
++} from '../../services/aemeath-management';
++
++interface Notice {
++  kind: 'ok' | 'error' | 'info';
++  text: string;
++}
++
++const NOTICE_COLOR: Record<Notice['kind'], string> = {
++  ok: 'green.300',
++  error: 'red.300',
++  info: 'blue.200',
++};
++
++export default function MemoryPage(): JSX.Element {
++  const [query, setQuery] = useState('');
++  const [listing, setListing] = useState<MemoryListResponse | null>(null);
++  const [loadError, setLoadError] = useState('');
++  const [notice, setNotice] = useState<Notice | null>(null);
++  const [busy, setBusy] = useState(false);
++
++  const [editingId, setEditingId] = useState('');
++  const [editText, setEditText] = useState('');
++
++  const [impact, setImpact] = useState<MemoryImpact | null>(null);
++  const [impactFor, setImpactFor] = useState('');
++  const [selection, setSelection] = useState<MemorySource[]>([]);
++  const [selectionFor, setSelectionFor] = useState('');
++
++  const [backups, setBackups] = useState<BackupEntry[]>([]);
++  const [restoreWarning, setRestoreWarning] = useState('');
++
++  /**
++   * Load memories.
++   *
++   * A load failure is held separately from the listing so the two states can be
++   * rendered differently: an empty list from a working search is a result, an
++   * error is not.
++   */
++  const load = useCallback(async (text: string) => {
++    try {
++      const data = text.trim()
++        ? await searchMemories(text)
++        : await fetchMemories();
++      setListing(data);
++      setLoadError('');
++    } catch (error) {
++      setListing(null);
++      setLoadError(error instanceof Error ? error.message : String(error));
++    }
++  }, []);
++
++  const loadBackups = useCallback(async () => {
++    try {
++      const data = await fetchBackups();
++      setBackups(data.backups ?? []);
++    } catch {
++      // A missing backup list is not an error worth a banner; the panel simply
++      // shows that there are none.
++      setBackups([]);
++    }
++  }, []);
++
++  useEffect(() => {
++    void load('');
++    void loadBackups();
++  }, [load, loadBackups]);
++
++  const run = async (action: () => Promise<any>, successText: string, after?: () => void) => {
++    setBusy(true);
++    setNotice(null);
++    try {
++      const result = await action();
++      if (result?.ok) {
++        setNotice({ kind: 'ok', text: successText });
++        after?.();
++      } else {
++        setNotice({ kind: 'error', text: result?.error || '操作失败。' });
++      }
++      // `needs_selection` means nothing was removed; surface it rather than
++      // treating the call as a completed removal.
++      if (result && !result.ok && result.needs_selection?.length) {
++        setSelection(result.needs_selection);
++      }
++      await load(query);
++    } catch (error) {
++      const payload = error instanceof ManagementError ? error.payload : null;
++      if (payload && (payload as any).needs_selection?.length) {
++        setSelection((payload as any).needs_selection);
++      }
++      if (payload && (payload as any).impact) {
++        setImpact((payload as any).impact);
++      }
++      setNotice({
++        kind: 'error',
++        text: error instanceof Error ? error.message : String(error),
++      });
++    } finally {
++      setBusy(false);
++    }
++  };
++
++  const startForget = async (item: MemoryItemView) => {
++    setImpact(null);
++    setImpactFor(item.memory_id);
++    setSelection([]);
++    try {
++      setImpact(await fetchMemoryImpact(item.memory_id));
++    } catch (error) {
++      setNotice({
++        kind: 'error',
++        text: error instanceof Error ? error.message : String(error),
++      });
++    }
++  };
++
++  const doForget = async (item: MemoryItemView, confirmCascading: boolean) => {
++    await run(
++      () => forgetMemory(item.memory_id, { confirmCascading }),
++      '已遗忘这条记忆。',
++      () => {
++        setImpact(null);
++        setImpactFor('');
++        setSelection([]);
++      },
++    );
++  };
++
++  const doCorrect = async (item: MemoryItemView) => {
++    const text = editText.trim();
++    if (!text) {
++      setNotice({ kind: 'error', text: '记忆内容不能为空。' });
++      return;
++    }
++    await run(() => correctMemory(item.memory_id, text), '已纠正，新内容会用于后续对话。', () => {
++      setEditingId('');
++      setEditText('');
++    });
++  };
++
++  const doRestore = async (backup: BackupEntry, confirm: boolean) => {
++    setBusy(true);
++    setNotice(null);
++    try {
++      const result = await restoreBackup(backup.path, confirm);
++      if (result.ok) {
++        setNotice({ kind: 'ok', text: '已恢复备份。重启 Aemeath 后生效。' });
++        setRestoreWarning('');
++      } else if (result.requires_confirmation) {
++        // Show the warning and require an explicit second click; the restore
++        // has not run.
++        setRestoreWarning(result.warning || '恢复备份前需要确认。');
++        setNotice({ kind: 'info', text: '请确认下方提示后再执行恢复。' });
++      } else {
++        setNotice({ kind: 'error', text: result.error || '恢复失败。' });
++      }
++      await load(query);
++    } catch (error) {
++      setNotice({
++        kind: 'error',
++        text: error instanceof Error ? error.message : String(error),
++      });
++    } finally {
++      setBusy(false);
++    }
++  };
++
++  const unavailable = listing !== null && !listing.ok;
++
++  return (
++    <Box maxWidth="900px">
++      <Heading size="md" marginBottom="2">
++        记忆
++      </Heading>
++      <Text fontSize="sm" color="whiteAlpha.800" marginBottom="4">
++        查看、搜索、纠正和遗忘本地记忆。记忆保存在本机数据库中。
++      </Text>
++
++      {notice && (
++        <Box
++          background="blackAlpha.400"
++          borderWidth="1px"
++          borderColor={NOTICE_COLOR[notice.kind]}
++          padding="3"
++          marginBottom="4"
++          borderRadius="md"
++        >
++          <Text fontSize="sm">{notice.text}</Text>
++        </Box>
++      )}
++
++      {loadError && (
++        <Box
++          background="red.900"
++          borderWidth="1px"
++          borderColor="red.400"
++          padding="3"
++          marginBottom="4"
++          borderRadius="md"
++        >
++          <Text fontWeight="bold">无法读取记忆</Text>
++          <Text fontSize="sm">{loadError}</Text>
++          <Button size="sm" marginTop="2" onClick={() => void load(query)}>
++            重试
++          </Button>
++        </Box>
++      )}
++
++      <Flex marginBottom="3">
++        <Input
++          value={query}
++          onChange={(e) => setQuery(e.target.value)}
++          placeholder="按含义搜索，留空显示全部"
++          marginRight="2"
++          onKeyDown={(e) => {
++            if (e.key === 'Enter') void load(query);
++          }}
++        />
++        <Button colorPalette="blue" disabled={busy} onClick={() => void load(query)}>
++          搜索
++        </Button>
++      </Flex>
++
++      {unavailable && listing && (
++        <Box
++          background="orange.900"
++          borderWidth="1px"
++          borderColor="orange.300"
++          padding="3"
++          marginBottom="4"
++          borderRadius="md"
++        >
++          <Text fontWeight="bold">检索不可用，这不是「没有记忆」</Text>
++          <Text fontSize="sm">{listing.error}</Text>
++          <Text fontSize="xs" marginTop="1" color="whiteAlpha.800">
++            下面列出的记忆来自本地数据库，仍然可以查看、纠正或遗忘；
++            按含义搜索需要先配置嵌入模型。
++          </Text>
++        </Box>
++      )}
++
++      {listing && listing.ok && listing.memories.length === 0 && (
++        <Text fontSize="sm" color="whiteAlpha.700" marginBottom="4">
++          {query.trim() ? '没有匹配的记忆。' : '还没有记住任何内容。'}
++        </Text>
++      )}
++
++      {listing?.memories.map((item) => (
++        <Box
++          key={item.memory_id}
++          borderWidth="1px"
++          borderColor="whiteAlpha.300"
++          borderRadius="md"
++          padding="3"
++          marginBottom="3"
++        >
++          {editingId === item.memory_id ? (
++            <Box>
++              <Textarea
++                value={editText}
++                onChange={(e) => setEditText(e.target.value)}
++                rows={3}
++                marginBottom="2"
++              />
++              <Button
++                size="sm"
++                colorPalette="blue"
++                marginRight="2"
++                disabled={busy}
++                onClick={() => void doCorrect(item)}
++              >
++                保存纠正
++              </Button>
++              <Button size="sm" variant="ghost" onClick={() => setEditingId('')}>
++                取消
++              </Button>
++            </Box>
++          ) : (
++            <Box>
++              <Text fontSize="sm" whiteSpace="pre-wrap">
++                {item.content}
++              </Text>
++              <Text fontSize="xs" color="whiteAlpha.600" marginTop="1">
++                {item.kind === 'experience' ? '经历' : '事实'}
++                {item.valid ? '' : '（已被替代，不再参与检索）'}
++                {item.superseded_by ? ` → ${item.superseded_by.slice(0, 8)}` : ''}
++              </Text>
++
++              {item.sources.length > 0 && (
++                <Box marginTop="2">
++                  <Text fontSize="xs" color="whiteAlpha.700">
++                    来源消息：
++                  </Text>
++                  {item.sources.map((source) => (
++                    <Text
++                      key={source.message_id}
++                      fontSize="xs"
++                      color="whiteAlpha.600"
++                      whiteSpace="pre-wrap"
++                    >
++                      · {source.content || '（消息已删除）'}
++                    </Text>
++                  ))}
++                </Box>
++              )}
++
++              {impactFor === item.memory_id && impact && (
++                <Box
++                  background="blackAlpha.400"
++                  borderWidth="1px"
++                  borderColor={impact.removes_source_messages ? 'orange.300' : 'whiteAlpha.300'}
++                  padding="2"
++                  marginTop="2"
++                  borderRadius="md"
++                >
++                  <Text fontSize="xs">{impact.message}</Text>
++                  {impact.removes_source_messages && (
++                    <Text fontSize="xs" color="orange.200" marginTop="1">
++                      这会删除 {impact.affected_message_ids.length} 条来源消息及其中的其他内容。
++                    </Text>
++                  )}
++                  <Flex marginTop="2">
++                    <Button
++                      size="xs"
++                      colorPalette={impact.removes_source_messages ? 'red' : 'blue'}
++                      marginRight="2"
++                      disabled={busy}
++                      onClick={() => void doForget(item, impact.removes_source_messages)}
++                    >
++                      {impact.removes_source_messages ? '确认连带删除并遗忘' : '确认遗忘'}
++                    </Button>
++                    <Button
++                      size="xs"
++                      variant="ghost"
++                      onClick={() => {
++                        setImpactFor('');
++                        setImpact(null);
++                      }}
++                    >
++                      取消
++                    </Button>
++                  </Flex>
++                </Box>
++              )}
++
++              {selectionFor === item.memory_id && selection.length > 0 && (
++                <Box
++                  background="blackAlpha.400"
++                  borderWidth="1px"
++                  borderColor="orange.300"
++                  padding="2"
++                  marginTop="2"
++                  borderRadius="md"
++                >
++                  <Text fontSize="xs" fontWeight="bold">
++                    这条记忆没有可定位的原文片段，尚未删除任何内容
++                  </Text>
++                  <Text fontSize="xs" marginTop="1">
++                    请从下面的来源中选择要移除的片段：
++                  </Text>
++                  {selection.map((source) => (
++                    <Button
++                      key={source.message_id}
++                      size="xs"
++                      display="block"
++                      width="100%"
++                      textAlign="left"
++                      marginTop="1"
++                      variant="outline"
++                      disabled={busy}
++                      onClick={() =>
++                        void run(
++                          () => forgetMemory(item.memory_id, { fragments: [source.content] }),
++                          '已按所选片段遗忘。',
++                          () => setSelectionFor(''),
++                        )
++                      }
++                    >
++                      {source.content || '（消息已删除）'}
++                    </Button>
++                  ))}
++                </Box>
++              )}
++
++              {impactFor !== item.memory_id && (
++                <Flex marginTop="2">
++                  <Button
++                    size="xs"
++                    variant="outline"
++                    marginRight="2"
++                    onClick={() => {
++                      setEditingId(item.memory_id);
++                      setEditText(item.content);
++                    }}
++                  >
++                    纠正
++                  </Button>
++                  <Button
++                    size="xs"
++                    variant="outline"
++                    colorPalette="red"
++                    disabled={busy}
++                    onClick={() => {
++                      setSelectionFor('');
++                      void startForget(item);
++                    }}
++                  >
++                    遗忘
++                  </Button>
++                </Flex>
++              )}
++            </Box>
++          )}
++        </Box>
++      ))}
++
++      <Heading size="sm" marginTop="6" marginBottom="2">
++        备份恢复
++      </Heading>
++      <Text fontSize="xs" color="whiteAlpha.700" marginBottom="2">
++        恢复备份会用备份内容替换当前本地数据库。如果备份是在删除或遗忘之前创建的，
++        那些内容会一起回来。
++      </Text>
++
++      {restoreWarning && (
++        <Box
++          background="orange.900"
++          borderWidth="1px"
++          borderColor="orange.300"
++          padding="3"
++          marginBottom="3"
++          borderRadius="md"
++        >
++          <Text fontSize="sm" fontWeight="bold">
++            恢复备份前请确认
++          </Text>
++          <Text fontSize="sm">{restoreWarning}</Text>
++        </Box>
++      )}
++
++      {backups.length === 0 ? (
++        <Text fontSize="sm" color="whiteAlpha.700">
++          没有找到备份文件。
++        </Text>
++      ) : (
++        backups.map((backup) => (
++          <Flex
++            key={backup.path}
++            alignItems="center"
++            justifyContent="space-between"
++            borderWidth="1px"
++            borderColor="whiteAlpha.300"
++            borderRadius="md"
++            padding="2"
++            marginBottom="2"
++          >
++            <Text fontSize="sm">
++              {backup.name}（{Math.round(backup.size_bytes / 1024)} KB）
++            </Text>
++            <Button
++              size="xs"
++              colorPalette="orange"
++              disabled={busy}
++              onClick={() => void doRestore(backup, Boolean(restoreWarning))}
++            >
++              {restoreWarning ? '确认恢复' : '恢复'}
++            </Button>
++          </Flex>
++        ))
++      )}
++    </Box>
++  );
++}
+diff --git a/src/renderer/src/components/aemeath/voice-page.tsx b/src/renderer/src/components/aemeath/voice-page.tsx
+new file mode 100644
+index 0000000..a53504c
+--- /dev/null
++++ b/src/renderer/src/components/aemeath/voice-page.tsx
+@@ -0,0 +1,334 @@
++/* eslint-disable @typescript-eslint/no-explicit-any */
++/**
++ * Voice management page (v2 task V2-T02).
++ *
++ * Two rules from the acceptance criteria shape this screen:
++ *
++ * 1. **A voice can be heard before it is applied, and a failed apply keeps the
++ *    old voice.** Auditioning synthesises a sample without touching the active
++ *    configuration; applying is a separate action that the backend refuses when
++ *    the preset cannot work, leaving the previously working voice in place.
++ * 2. **A sample voice is never described as the official one.** The real
++ *    Aemeath voice material does not exist yet, so every preset from the
++ *    backend carries `is_official_voice: false` and the page says 示例音色
++ *    rather than implying the user is listening to her real voice.
++ *
++ * The page performs no conversation: it does not open the microphone or touch
++ * the character window's audio queue. Auditioning plays a short sample through
++ * a plain `Audio` element, which is replaceable with a controlled playback
++ * entry point when the desktop task wires one up.
++ */
++import { useCallback, useEffect, useRef, useState } from 'react';
++import { Box, Button, Flex, Heading, Input, Text } from '@chakra-ui/react';
++
++import {
++  applyVoice,
++  auditionVoice,
++  createVoicePreset,
++  fetchVoices,
++  type VoiceOverviewResponse,
++  type VoicePreset,
++} from '../../services/aemeath-management';
++
++interface Notice {
++  kind: 'ok' | 'error' | 'info';
++  text: string;
++}
++
++const NOTICE_COLOR: Record<Notice['kind'], string> = {
++  ok: 'green.300',
++  error: 'red.300',
++  info: 'blue.200',
++};
++
++const AUDITION_TEXT = '你好，我是爱弥斯。';
++
++export default function VoicePage(): JSX.Element {
++  const [data, setData] = useState<VoiceOverviewResponse | null>(null);
++  const [loadError, setLoadError] = useState('');
++  const [notice, setNotice] = useState<Notice | null>(null);
++  const [busy, setBusy] = useState(false);
++
++  const [name, setName] = useState('');
++  const [apiUrl, setApiUrl] = useState('http://127.0.0.1:9880/tts');
++  const [refAudio, setRefAudio] = useState('');
++  const [promptText, setPromptText] = useState('');
++
++  const audioRef = useRef<HTMLAudioElement | null>(null);
++
++  const load = useCallback(async () => {
++    try {
++      setData(await fetchVoices());
++      setLoadError('');
++    } catch (error) {
++      setData(null);
++      setLoadError(error instanceof Error ? error.message : String(error));
++    }
++  }, []);
++
++  useEffect(() => {
++    void load();
++    return () => {
++      // Stop any sample still playing when the page goes away.
++      audioRef.current?.pause();
++    };
++  }, [load]);
++
++  const audition = async (preset: VoicePreset) => {
++    setBusy(true);
++    setNotice(null);
++    try {
++      const result = await auditionVoice(preset.preset_id, AUDITION_TEXT);
++      if (!result.ok) {
++        setNotice({ kind: 'error', text: result.error || '试听失败。' });
++        return;
++      }
++      const audio = new Audio(`data:audio/${result.media_type || 'wav'};base64,${result.audio}`);
++      audioRef.current?.pause();
++      audioRef.current = audio;
++      await audio.play();
++      setNotice({ kind: 'ok', text: `正在试听「${preset.label || preset.name}」。` });
++    } catch (error) {
++      setNotice({
++        kind: 'error',
++        text: `无法播放试听音频：${error instanceof Error ? error.message : String(error)}`,
++      });
++    } finally {
++      setBusy(false);
++    }
++  };
++
++  const apply = async (preset: VoicePreset) => {
++    setBusy(true);
++    setNotice(null);
++    try {
++      const result = await applyVoice(preset.preset_id, data?.read_error ?? '');
++      if (result.ok) {
++        setNotice({
++          kind: 'ok',
++          text: `已应用「${preset.label || preset.name}」，重启 Aemeath 后生效。`,
++        });
++      } else {
++        setNotice({
++          kind: 'error',
++          text: `${result.error || '应用失败。'}原来的音色保持不变。`,
++        });
++      }
++      await load();
++    } catch (error) {
++      setNotice({
++        kind: 'error',
++        text: `${error instanceof Error ? error.message : String(error)}原来的音色保持不变。`,
++      });
++    } finally {
++      setBusy(false);
++    }
++  };
++
++  const savePreset = async () => {
++    setBusy(true);
++    setNotice(null);
++    try {
++      const result = await createVoicePreset({
++        name,
++        apiUrl,
++        refAudioPath: refAudio,
++        promptText,
++      });
++      if (result.ok) {
++        setNotice({ kind: 'ok', text: '预设已保存，可先试听再应用。' });
++        setName('');
++        setRefAudio('');
++        setPromptText('');
++      } else {
++        setNotice({ kind: 'error', text: result.error || '保存预设失败。' });
++      }
++      await load();
++    } catch (error) {
++      setNotice({
++        kind: 'error',
++        text: error instanceof Error ? error.message : String(error),
++      });
++    } finally {
++      setBusy(false);
++    }
++  };
++
++  return (
++    <Box maxWidth="900px">
++      <Heading size="md" marginBottom="2">
++        声音
++      </Heading>
++      <Text fontSize="sm" color="whiteAlpha.800" marginBottom="2">
++        声音由本地 GPT-SoVITS 服务合成。可以先试听，再决定是否应用。
++      </Text>
++
++      <Box
++        background="blackAlpha.400"
++        borderWidth="1px"
++        borderColor="orange.300"
++        padding="3"
++        marginBottom="4"
++        borderRadius="md"
++      >
++        <Text fontSize="sm" fontWeight="bold">
++          当前没有爱弥斯的正式音色
++        </Text>
++        <Text fontSize="sm">
++          正式音色素材尚未提供，这里列出的是示例音色，用于验证语音链路。
++          示例音色不代表爱弥斯的正式声音。
++        </Text>
++      </Box>
++
++      {loadError && (
++        <Box
++          background="red.900"
++          borderWidth="1px"
++          borderColor="red.400"
++          padding="3"
++          marginBottom="4"
++          borderRadius="md"
++        >
++          <Text fontWeight="bold">无法读取声音配置</Text>
++          <Text fontSize="sm">{loadError}</Text>
++          <Button size="sm" marginTop="2" onClick={() => void load()}>
++            重试
++          </Button>
++        </Box>
++      )}
++
++      {notice && (
++        <Box
++          background="blackAlpha.400"
++          borderWidth="1px"
++          borderColor={NOTICE_COLOR[notice.kind]}
++          padding="3"
++          marginBottom="4"
++          borderRadius="md"
++        >
++          <Text fontSize="sm">{notice.text}</Text>
++        </Box>
++      )}
++
++      {data && (
++        <Text fontSize="sm" marginBottom="4" color="whiteAlpha.700">
++          当前语音引擎：{data.engine || '（未配置）'}
++          {data.engine_is_gpt_sovits ? '' : '（尚未切换到本地 GPT-SoVITS）'}
++        </Text>
++      )}
++
++      {data?.presets.map((preset) => {
++        const active = data.active_preset_id === preset.preset_id;
++        return (
++          <Box
++            key={preset.preset_id}
++            borderWidth="1px"
++            borderColor={active ? 'green.300' : 'whiteAlpha.300'}
++            borderRadius="md"
++            padding="3"
++            marginBottom="3"
++          >
++            <Flex alignItems="center" justifyContent="space-between">
++              <Box>
++                <Text fontSize="sm" fontWeight="bold">
++                  {preset.label || preset.name}
++                  {active ? '（使用中）' : ''}
++                </Text>
++                {!preset.is_official_voice && (
++                  <Text fontSize="xs" color="orange.200">
++                    示例音色，不是正式爱弥斯音色
++                  </Text>
++                )}
++              </Box>
++            </Flex>
++
++            {preset.description && (
++              <Text fontSize="xs" color="whiteAlpha.700" marginTop="1">
++                {preset.description}
++              </Text>
++            )}
++
++            <Text fontSize="xs" color="whiteAlpha.600" marginTop="1">
++              参考音频：{preset.ref_audio_path || '（未设置）'}
++            </Text>
++
++            <Flex marginTop="2">
++              <Button
++                size="xs"
++                variant="outline"
++                marginRight="2"
++                disabled={busy}
++                onClick={() => void audition(preset)}
++              >
++                试听
++              </Button>
++              {!preset.builtin && (
++                <Button
++                  size="xs"
++                  colorPalette="blue"
++                  disabled={busy || active}
++                  onClick={() => void apply(preset)}
++                >
++                  {active ? '已应用' : '应用'}
++                </Button>
++              )}
++            </Flex>
++          </Box>
++        );
++      })}
++
++      <Heading size="sm" marginTop="6" marginBottom="2">
++        添加音色预设
++      </Heading>
++      <Text fontSize="xs" color="whiteAlpha.700" marginBottom="3">
++        参考音频决定音色，参考文字必须是该音频的真实转写；写错会让音色与韵律明显变差。
++        训练新声音的向导在后续任务中提供。
++      </Text>
++
++      <Text fontSize="sm" marginBottom="1">
++        名称
++      </Text>
++      <Input
++        value={name}
++        onChange={(e) => setName(e.target.value)}
++        placeholder="例如：我的声音"
++        marginBottom="3"
++      />
++
++      <Text fontSize="sm" marginBottom="1">
++        GPT-SoVITS 服务地址
++      </Text>
++      <Input
++        value={apiUrl}
++        onChange={(e) => setApiUrl(e.target.value)}
++        marginBottom="3"
++      />
++
++      <Text fontSize="sm" marginBottom="1">
++        参考音频路径（本机文件）
++      </Text>
++      <Input
++        value={refAudio}
++        onChange={(e) => setRefAudio(e.target.value)}
++        placeholder="例如：models/ref/my-voice.wav"
++        marginBottom="1"
++      />
++      <Text fontSize="xs" color="whiteAlpha.700" marginBottom="3">
++        参考音频留在本机，不会上传，也不进源码管理。
++      </Text>
++
++      <Text fontSize="sm" marginBottom="1">
++        参考文字（该音频的真实转写）
++      </Text>
++      <Input
++        value={promptText}
++        onChange={(e) => setPromptText(e.target.value)}
++        marginBottom="3"
++      />
++
++      <Button colorPalette="blue" disabled={busy} onClick={() => void savePreset()}>
++        保存预设
++      </Button>
++    </Box>
++  );
++}
 diff --git a/src/renderer/src/services/aemeath-management.ts b/src/renderer/src/services/aemeath-management.ts
 new file mode 100644
-index 0000000..de0ce07
+index 0000000..3ceb6e8
 --- /dev/null
 +++ b/src/renderer/src/services/aemeath-management.ts
-@@ -0,0 +1,208 @@
+@@ -0,0 +1,536 @@
 +/**
 + * Aemeath management API client.
 + *
@@ -515,6 +1683,173 @@ index 0000000..de0ce07
 +  model: ModelOverview;
 +  persona: PersonaOverview;
 +  read_error: string;
++}
++
++// ---------------------------------------------------------------------------
++// Memory (V2-T02)
++// ---------------------------------------------------------------------------
++
++/** One message a memory was extracted from. */
++export interface MemorySource {
++  message_id: string;
++  fragment: string;
++  content: string;
++  revision: number;
++}
++
++/** A memory as the management page shows it. */
++export interface MemoryItemView {
++  memory_id: string;
++  kind: string;
++  content: string;
++  valid: boolean;
++  superseded_by: string;
++  created_at: number;
++  updated_at: number;
++  sources: MemorySource[];
++}
++
++/**
++ * A memory listing.
++ *
++ * `available` is the distinction the acceptance criteria require: `ok: false`
++ * with an empty `memories` means the search could not run, which is a different
++ * situation from a memory that is genuinely empty. The page must never render
++ * the first as the second.
++ */
++export interface MemoryListResponse {
++  ok: boolean;
++  available: boolean;
++  error: string;
++  memories: MemoryItemView[];
++}
++
++/** What removing a memory would actually do. */
++export interface MemoryImpact {
++  ok: boolean;
++  error: string;
++  mode: 'precise' | 'cascading' | '';
++  message: string;
++  removes_source_messages: boolean;
++  affected_message_ids: string[];
++}
++
++/** Outcome of a correction or a forgetting. */
++export interface MemoryMutationResponse {
++  ok: boolean;
++  error: string;
++  memory_id: string;
++  needs_selection: MemorySource[];
++  removed_fragments: string[];
++  invalidated_derived: string[];
++  rebuild_required: boolean;
++}
++
++/** One backup file available to restore. */
++export interface BackupEntry {
++  path: string;
++  name: string;
++  size_bytes: number;
++  modified_at: number;
++}
++
++/** Outcome of a restore, carrying the warning either way. */
++export interface RestoreResponse {
++  ok: boolean;
++  error: string;
++  requires_confirmation: boolean;
++  may_restore_forgotten_content: boolean;
++  warning: string;
++  backup_path: string;
++  restored: boolean;
++  restart_required: boolean;
++}
++
++// ---------------------------------------------------------------------------
++// Voice (V2-T02)
++// ---------------------------------------------------------------------------
++
++/** One voice preset. `is_official_voice` is false while no real material exists. */
++export interface VoicePreset {
++  preset_id: string;
++  name: string;
++  label: string;
++  description: string;
++  is_official_voice: boolean;
++  builtin: boolean;
++  api_url: string;
++  ref_audio_path: string;
++  prompt_text: string;
++  text_lang: string;
++  prompt_lang: string;
++  text_split_method: string;
++  batch_size: string;
++  media_type: string;
++  streaming_mode: string;
++}
++
++/** Everything the voice page shows. */
++export interface VoiceOverviewResponse {
++  presets: VoicePreset[];
++  active_preset_id: string;
++  engine: string;
++  engine_is_gpt_sovits: boolean;
++  read_error: string;
++}
++
++/** Audition result; `audio` is base64. */
++export interface VoiceAuditionResponse {
++  ok: boolean;
++  error: string;
++  audio: string;
++  media_type: string;
++}
++
++/** Outcome of creating or applying a preset. */
++export interface VoiceActionResult {
++  ok: boolean;
++  error: string;
++  preset_id: string;
++  conflict: boolean;
++  restart_required: boolean;
++}
++
++// ---------------------------------------------------------------------------
++// Live2D (V2-T02)
++// ---------------------------------------------------------------------------
++
++/** One Live2D model available on this machine. */
++export interface Live2DModel {
++  name: string;
++  label: string;
++  description: string;
++  is_official_model: boolean;
++  is_placeholder: boolean;
++  url: string;
++  scale: number;
++  x_offset: number;
++  y_offset: number;
++  x_shift: number;
++}
++
++/** The Live2D page state. `error` explains a missing model instead of blanking. */
++export interface Live2DOverviewResponse {
++  ok: boolean;
++  error: string;
++  models_root: string;
++  model_dict_path: string;
++  active_model: string;
++  active_model_available: boolean;
++  models: Live2DModel[];
++  active: Live2DModel | null;
++}
++
++/** Outcome of a Live2D save. */
++export interface Live2DSaveResult {
++  ok: boolean;
++  error: string;
++  conflict: boolean;
++  restart_required: boolean;
 +}
 +
 +/** Base path of the management routes. */
@@ -661,4 +1996,165 @@ index 0000000..de0ce07
 +    detail: '运行中的服务正在使用当前配置。',
 +    pending: false,
 +  };
++}
++
++// ---------------------------------------------------------------------------
++// Memory API (V2-T02)
++// ---------------------------------------------------------------------------
++
++/** List every memory, including ones the search index cannot reach. */
++export async function fetchMemories(): Promise<MemoryListResponse> {
++  return request<MemoryListResponse>('/memory/list');
++}
++
++/** Search the memory by meaning. An empty query lists everything. */
++export async function searchMemories(
++  query: string,
++  limit = 20,
++): Promise<MemoryListResponse> {
++  return request<MemoryListResponse>('/memory/search', {
++    method: 'POST',
++    body: JSON.stringify({ query, limit }),
++  });
++}
++
++/** What removing this memory would actually do, before acting. */
++export async function fetchMemoryImpact(memoryId: string): Promise<MemoryImpact> {
++  return request<MemoryImpact>(`/memory/${encodeURIComponent(memoryId)}/impact`);
++}
++
++/** Replace a memory's content; the old one is kept for provenance. */
++export async function correctMemory(
++  memoryId: string,
++  content: string,
++): Promise<MemoryMutationResponse> {
++  return request<MemoryMutationResponse>('/memory/correct', {
++    method: 'POST',
++    body: JSON.stringify({ memory_id: memoryId, content }),
++  });
++}
++
++/**
++ * Forget one fact.
++ *
++ * `confirmCascading` must be set when the memory has no locatable span: the
++ * operation then also removes the source messages, and the backend refuses
++ * until that is accepted rather than doing it silently.
++ */
++export async function forgetMemory(
++  memoryId: string,
++  options: { fragments?: string[]; confirmCascading?: boolean } = {},
++): Promise<MemoryMutationResponse> {
++  return request<MemoryMutationResponse>('/memory/forget', {
++    method: 'POST',
++    body: JSON.stringify({
++      memory_id: memoryId,
++      fragments: options.fragments ?? null,
++      confirm_cascading: options.confirmCascading ?? false,
++    }),
++  });
++}
++
++/** Backups available to restore. */
++export async function fetchBackups(): Promise<{
++  ok: boolean;
++  error: string;
++  backups: BackupEntry[];
++}> {
++  return request('/memory/backups');
++}
++
++/** Restore a backup. The warning is returned whether or not it runs. */
++export async function restoreBackup(
++  backupPath: string,
++  confirm: boolean,
++): Promise<RestoreResponse> {
++  return request<RestoreResponse>('/memory/restore', {
++    method: 'POST',
++    body: JSON.stringify({ backup_path: backupPath, confirm }),
++  });
++}
++
++// ---------------------------------------------------------------------------
++// Voice API (V2-T02)
++// ---------------------------------------------------------------------------
++
++/** Presets, the active one, and the configured engine. */
++export async function fetchVoices(): Promise<VoiceOverviewResponse> {
++  return request<VoiceOverviewResponse>('/voice/overview');
++}
++
++/** Save a preset without activating it. */
++export async function createVoicePreset(input: {
++  name: string;
++  apiUrl: string;
++  refAudioPath: string;
++  promptText: string;
++  textLang?: string;
++  promptLang?: string;
++  expectedRevision?: string;
++}): Promise<VoiceActionResult> {
++  return request<VoiceActionResult>('/voice/preset', {
++    method: 'POST',
++    body: JSON.stringify({
++      name: input.name,
++      api_url: input.apiUrl,
++      ref_audio_path: input.refAudioPath,
++      prompt_text: input.promptText,
++      text_lang: input.textLang ?? 'zh',
++      prompt_lang: input.promptLang ?? 'zh',
++      expected_revision: input.expectedRevision ?? '',
++    }),
++  });
++}
++
++/** Make a preset the active voice. A failure leaves the previous voice in place. */
++export async function applyVoice(
++  presetId: string,
++  expectedRevision = '',
++): Promise<VoiceActionResult> {
++  return request<VoiceActionResult>('/voice/apply', {
++    method: 'POST',
++    body: JSON.stringify({ preset_id: presetId, expected_revision: expectedRevision }),
++  });
++}
++
++/** Synthesise a sample without applying the preset. */
++export async function auditionVoice(
++  presetId: string,
++  text: string,
++): Promise<VoiceAuditionResponse> {
++  return request<VoiceAuditionResponse>('/voice/audition', {
++    method: 'POST',
++    body: JSON.stringify({ preset_id: presetId, text }),
++  });
++}
++
++// ---------------------------------------------------------------------------
++// Live2D API (V2-T02)
++// ---------------------------------------------------------------------------
++
++/** Installed models, the active one, and what is missing. */
++export async function fetchLive2D(): Promise<Live2DOverviewResponse> {
++  return request<Live2DOverviewResponse>('/live2d/overview');
++}
++
++/** Select a model and save its scale and position. */
++export async function saveLive2D(input: {
++  modelName: string;
++  scale: number;
++  xOffset: number;
++  yOffset: number;
++  expectedRevision: string;
++}): Promise<Live2DSaveResult> {
++  return request<Live2DSaveResult>('/live2d/save', {
++    method: 'POST',
++    body: JSON.stringify({
++      model_name: input.modelName,
++      scale: input.scale,
++      x_offset: input.xOffset,
++      y_offset: input.yOffset,
++      expected_revision: input.expectedRevision,
++    }),
++  });
 +}

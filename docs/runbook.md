@@ -235,6 +235,70 @@ Invoke-RestMethod -Uri 'http://127.0.0.1:12393/aemeath/manage/overview'
 管理页与角色页是**互斥的两个窗口**：管理页不建立对话连接、不打开麦克风、不播放音频，
 因此打开它不会产生第二路会话。
 
+## 管理界面：声音、记忆与 Live2D（V2-T02）
+
+同一地址，导航扩展为六项：概览／模型／人设／声音／记忆／Live2D。
+
+**记忆页。** 列表与搜索是两条路：列表直接读本地数据库，嵌入模型不可用时仍能查看与
+修正；搜索走向量检索。检索不可用时页面显示「检索不可用，这不是『没有记忆』」并给出
+原因，而不是渲染成空列表。
+
+- 纠正：替换内容，旧内容保留原文但不再参与检索，新内容立即可召回。
+- 遗忘：只移除该事实在来源消息中的片段，同一条消息里的其他内容保留。操作前页面先取
+  `GET /memory/{id}/impact` 展示**实际影响**；当记忆没有可定位片段、只能连带删除来源
+  消息时，按钮变为「确认连带删除并遗忘」，需要再次确认。未确认时接口返回 **409**
+  且不改动任何数据。
+- 无法定位片段时页面**不声称已遗忘**，而是列出来源消息让用户选择要移除的片段。
+- 备份恢复先显示警告：备份若创建于遗忘之前，被遗忘的内容会一起回来；确认后才执行。
+
+**声音页。** 列出示例与自定义预设，可「试听」与「应用」。试听需要本地 GPT-SoVITS
+服务在运行（默认 `http://127.0.0.1:9880/tts`）；未启动时明确提示「本地语音服务不可用」
+并给出端点，不静默失败。应用失败保留原音色。页面顶部固定说明：**当前没有爱弥斯的
+正式音色**，列出的是示例音色。添加预设需要参考音频路径与它的真实转写。
+
+**Live2D 页。** 列出本机已安装的模型（目录内需有 `.model3.json`），可设置比例与
+水平／垂直偏移。没有模型时给出明确说明与模型目录路径，仍可完成配置，不会空白失联；
+聊天、语音与字幕不受影响。示例模型标注为示例，不是正式爱弥斯模型。
+
+也可直接用 API 核对：
+
+```powershell
+Invoke-RestMethod -Uri 'http://127.0.0.1:12393/aemeath/manage/memory/list'
+Invoke-RestMethod -Uri 'http://127.0.0.1:12393/aemeath/manage/voice/overview'
+Invoke-RestMethod -Uri 'http://127.0.0.1:12393/aemeath/manage/live2d/overview'
+```
+
+服务运行中可跑两个端到端探针：
+
+```powershell
+.\vendor\Open-LLM-VTuber\.venv\Scripts\python.exe scripts\probe_management_v2.py
+.\vendor\Open-LLM-VTuber\.venv\Scripts\python.exe scripts\probe_memory_lifecycle.py
+```
+
+前者核对全部管理端点可达、错误码正确、响应不含凭据；后者真实走一遍
+「写入记忆 → 纠正 → 遗忘 → 重开数据库」，确认遗忘只移除目标片段而保留同一条消息里的
+其他内容。
+
+### 界面截图
+
+服务运行中可用无头 Chrome 抓取六个页面（截图同时核对页面确实渲染出内容，
+避免存下空白页）：
+
+```powershell
+.\vendor\Open-LLM-VTuber\.venv\Scripts\python.exe scripts\capture_manage_pages.py
+```
+
+产物在 `docs/images/manage-*.png`：概览、模型、人设、声音、记忆、Live2D。
+
+| 页面 | 截图 |
+| --- | --- |
+| 概览 | ![概览](images/manage-overview.png) |
+| 模型 | ![模型](images/manage-model.png) |
+| 人设 | ![人设](images/manage-persona.png) |
+| 声音 | ![声音](images/manage-voice.png) |
+| 记忆 | ![记忆](images/manage-memory.png) |
+| Live2D | ![Live2D](images/manage-live2d.png) |
+
 ## 状态与记忆管理
 
 ```powershell

@@ -110,6 +110,61 @@ character_config:
 `aemeath_config.legacy_persona_prompt` 保留，因此切换后原文仍可查看，迁移可回溯。
 组装提示词时只会使用其中一个来源，不会同时注入。
 
+## 三之三、声音、记忆与 Live2D 管理（V2-T02）
+
+在 V2-T01 的同一套契约（修订语义、原子写入、回环限制、凭据不回显）上补齐其余页面。
+
+| 项 | 值 |
+| --- | --- |
+| 记忆列表 | `GET /aemeath/manage/memory/list` |
+| 记忆搜索 | `POST /aemeath/manage/memory/search` |
+| 移除影响 | `GET /aemeath/manage/memory/{id}/impact` |
+| 纠正记忆 | `POST /aemeath/manage/memory/correct` |
+| 遗忘记忆 | `POST /aemeath/manage/memory/forget` |
+| 备份列表 | `GET /aemeath/manage/memory/backups` |
+| 恢复备份 | `POST /aemeath/manage/memory/restore` |
+| 声音概览 | `GET /aemeath/manage/voice/overview` |
+| 保存声音预设 | `POST /aemeath/manage/voice/preset` |
+| 应用声音 | `POST /aemeath/manage/voice/apply` |
+| 试听声音 | `POST /aemeath/manage/voice/audition` |
+| Live2D 概览 | `GET /aemeath/manage/live2d/overview` |
+| 保存 Live2D | `POST /aemeath/manage/live2d/save` |
+
+**记忆：「空结果」与「加载失败」必须区分。** 检索允许返回空，也可能因为未配置嵌入
+模型或提供商报错而不可用。两者都在响应里区分：`ok` 表示检索是否执行成功，
+`available` 表示索引是否可用，`error` 给出原因。界面**不得**把检索故障显示成
+「没有记忆」。列表接口不经过嵌入索引，因此嵌入不可用时仍可查看、纠正与遗忘。
+
+**纠正与遗忘是两种不同后果的操作。** `correct` 替换内容：旧记忆保留原文、标记失效并
+移出检索，新内容立即可召回。`forget` 只移除该事实在来源消息中的片段，同一条消息里的
+其他内容保留。若记忆没有可定位的片段，`forget` **不报告成功**，而是返回
+`needs_selection` 与来源消息，要求用户选定；此时什么都没有删除。
+
+`GET /memory/{id}/impact` 在操作前说明实际影响：`mode` 为 `precise`（只删片段）或
+`cascading`（连来源消息一起删）。**连带删除需要显式确认**：未确认时 `forget` 返回
+**409** 且不修改任何数据。界面不得把「只删这一条」映射到会连带删除来源消息的接口。
+
+**备份恢复。** `restore` 在 `confirm=false` 时**不执行**，而是返回警告
+（`may_restore_forgotten_content=true`）：备份若创建于遗忘之前，被遗忘的内容会随之
+回来。恢复用副本替换本机数据库，成功后 `restart_required=true`。
+
+**声音：预设是一整套参数。** 一个预设同时关联 GPT／SoVITS 权重、模型版本、参考音频、
+参考文字与语言、合成参数。应用前先校验（走上游 schema 并构造适配器确认参数合法），
+**任何一步失败都保留原来使用中的音色**，配置文件逐字节不变。试听走运行时同一个
+GPT-SoVITS 适配器，不另建通道；本地服务未启动时明确报「本地语音服务不可用」并给出
+端点，不静默失败。应用只改配置，**不接管角色窗口的音频会话**，返回
+`restart_required=true`。
+
+**声音：示例不等于正式。** 正式爱弥斯音色素材尚未提供，因此每个预设都带
+`is_official_voice=false`，界面必须标注「示例音色」，不得描述为正式音色。
+
+**Live2D：缺模型是一种状态，不是空白页。** 概览同时返回已安装模型、当前配置的模型
+与模型目录路径；模型目录缺失、目录为空、或配置的模型没有资源时，`error` 给出明确
+说明，页面仍可完成配置。只列出**磁盘上真实存在**的模型（目录内需有 `.model3.json`），
+不提供无法加载的条目。比例与位置写入 `model_dict.json`（客户端据此渲染），所选模型
+写入权威配置的 `live2d_model_name`；保存同样受修订冲突（409）保护，失败保留原文件。
+随应用提供的模型标注为示例模型，不描述为正式爱弥斯模型。
+
 ## 四、本地数据位置
 
 | 内容 | 位置 |

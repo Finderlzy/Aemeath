@@ -779,3 +779,121 @@ GitHub 状态本次未能实时核实：`gh` 不在 PATH，公开 REST 查询返
   （人设保存已有真实 HTTP 与生产入口回归覆盖）。
 - 前端既有 586 项 vendored `WebSDK` 类型错误为**改动前基线**，本次新增代码零错误。
 - 未做真实显示器缩放／多屏场景，属 V2-T03 桌面范围。
+
+
+## 十七、V2-T02 声音、记忆与 Live2D 管理（2026-09-14）
+
+**任务**：[#15](https://github.com/Finderlzy/Aemeath/issues/15)（V2-T02，V2-M1 管理基础）。
+**基线**：远端 `main` 的 `592eb02`，任务分支 `issue-15-voice-memory-live2d-management`。
+**范围**：在 V2-T01 的配置契约上补齐记忆、声音与 Live2D 三个管理页面及其后端与路由。
+
+### 开发前门禁：记忆一致性 fixture
+
+架构文档要求本任务开发前先固化四类隔离用例（纠正、精确遗忘、来源连带删除、重启一致
+性）外加备份恢复检查。这些用例**先写、先跑出 Red**（`ModuleNotFoundError` 确认为目标
+行为未实现，而非环境故障），再实现到 Green。
+
+### 实现结果
+
+| 产物 | 位置 |
+| --- | --- |
+| 记忆管理用例层 | `aemeath/management/memory_admin.py` |
+| 声音预设、试听与应用 | `aemeath/management/voices.py` |
+| Live2D 模型配置 | `aemeath/management/live2d.py` |
+| 请求／响应契约扩展 | `aemeath/management/schema.py` |
+| 管理路由扩展 | `aemeath/management/routes.py` |
+| 前端三个页面 | `docs/patches/web/0002-aemeath-management-ui.patch` |
+| 前端 API 客户端 | 同上（`aemeath-management.ts`） |
+| 生产入口回归测试 | `tests/integration/test_management_{memory,voice,live2d,routes_v2}.py`（48 项） |
+| 端到端探针 | `scripts/probe_management_v2.py`、`scripts/probe_memory_lifecycle.py` |
+
+### 验收对照
+
+| 验收项 | 结果 | 证据 |
+| --- | --- | --- |
+| 记忆「空结果」与「加载失败」可区分 | 通过 | 契约以 `ok`／`available`／`error` 三字段区分；未配置嵌入模型与提供商抛错两种故障各有用例；真实服务实测返回 `available=false` 并附原因，而非空列表 |
+| 纠正后新内容可召回、旧内容失效 | 通过 | 生产入口用例断言新记忆可召回、旧记忆 `valid=false` 且向量已从索引移除；真实服务实测纠正后新文本出现在列表、旧记忆退出默认列表 |
+| 精确遗忘后的来源影响符合契约 | 通过 | `describe_impact` 在操作前区分 `precise`／`cascading`；真实服务实测遗忘一条事实后，同一条来源消息中的「毕业设计」**仍然保留** |
+| 重启后结果一致 | 通过 | 遗忘与纠正各有一例重开数据库后断言；真实服务探针亦重开数据库复核 |
+| 备份恢复提示可能恢复已遗忘内容 | 通过 | `restore(confirm=false)` 不执行并返回 `may_restore_forgotten_content=true` 与警告文案；确认后才替换数据库 |
+| 来源连带删除不被静默执行 | 通过 | 无定位片段时 `forget` 返回 `needs_selection` 且**不删除任何内容**；连带删除未确认时返回 **409** |
+| 声音可直接试听并应用 | 通过 | 试听复用运行时 `GPTSoVITSAdapter`；真实服务实测本地 GPT-SoVITS 未启动时明确返回「本地语音服务不可用」并给出端点，不静默失败 |
+| 应用失败保留旧预设 | 通过 | 参数校验（含真实构造适配器）先于写入；失败时配置文件**逐字节不变**，原预设仍为 active；另有 `os.replace` 抛错后文件不变的用例 |
+| 切换声音不影响角色窗口音频所有权 | 通过 | 应用只改配置并返回 `restart_required=true`，不建立会话、不开麦克风、不播音频 |
+| 无 Live2D 模型时页面可完成配置并显示明确错误 | 通过 | 模型目录缺失、目录为空、配置模型无资源三种情况各有明确文案且仍返回可编辑状态；只列出磁盘上真实存在的模型 |
+| 不把示例音色／模型描述为正式 | 通过 | 每个预设 `is_official_voice=false`；示例模型 `is_official_model=false`；真实服务实测两个模型均标注为示例 |
+
+### 真实服务端到端验证（2026-09-14）
+
+以真实服务进程（`scripts/run_server.py --config config/acceptance/conf.acceptance.yaml`，
+隔离的 `data/acceptance/`，不触碰个人数据库）实测：
+
+| 探针 | 结果 |
+| --- | --- |
+| `scripts/probe_management_v2.py` | **23/23 通过**：全部管理端点可达；V2-T01 概览未受影响；修订冲突 409、未安装模型 422、未确认恢复 422 状态码正确；响应不含凭据 |
+| `scripts/probe_memory_lifecycle.py` | **16/16 通过**：写入记忆 → 列表与来源可见 → 影响判定为 `precise` → 纠正成功且新内容入列、旧记忆退出 → 遗忘成功且**同消息其他内容保留** → 重开数据库后仍为已遗忘 |
+| Live2D 真实写入 | `kScale` 0.5 → 0.6 落盘成功，`live2d_model_name` 保持不变；随后还原原值，`model_dict.json` 内容逐字节复原 |
+
+真实服务上另确认：本地 GPT-SoVITS 未启动时，试听返回
+「本地语音服务不可用（http://127.0.0.1:9880/tts）…」，不再报泛化的「试听失败」。
+
+### 复验中发现并修复的真实缺陷
+
+**试听把「服务没启动」报成泛化失败。** 初版只捕获 `ConnectionError`，而
+`GPTSoVITSAdapter.synthesize()` 将传输异常包装为 `ModelError`，因此该分支**永不触发**。
+后果是用户看到「试听失败：gpt-sovits request failed: All connection attempts failed」，
+无法判断是服务未启动还是参数有误，而这恰是最常见的失败场景。修复为沿异常链
+（`__cause__`／`__context__`）判定不可达，并对真实合成错误（如 422 参数拒绝）保留区分。
+隔离测试最初同样漏过——因为测试用的 double 直接抛 `ConnectionError`，与真实适配器行为
+不符；补上"被包装的错误"用例后成立，并做变异验证（改回直接捕获即失败）。
+
+### 补丁可复现性
+
+`web/0002` 重生后，在干净上游检出处（`d176e7d`）按序套用 `0001`→`0002`：
+`git apply --check` 与实套均成功，**6 个被修改/新增文件与工作副本逐字节一致**。
+五个后端补丁（`0001`–`0005`）对干净 `v1.2.1`（`3afa410`）亦全部 `--check` 通过。
+过程中发现并修正了一个再生错误：`0002` 必须在 `0001` **已套用**的树上生成，
+否则 `App.tsx` 中 `0001` 引入的 `AemeathProvider` 会被记成新增行，导致套用失败。
+
+### 回归基线
+
+`460 passed, 7 deselected`（本次新增 48 项；V2-T01 收口时为 410）。
+前端 `npm run typecheck` 新增代码零错误，总数维持 586 项 vendored `WebSDK` 改动前基线；
+`npm run build:web` 成功并已部署到上游 `frontend/`。
+
+### 界面截图
+
+用无头 Chrome（DevTools 协议）逐个点击六项导航并抓图，同时读取页面渲染文本确认
+**确实渲染出内容**而非空白页（空白页也是合法 PNG）。六张图两两不同，产物见
+`docs/images/manage-*.png`，抓取脚本 `scripts/capture_manage_pages.py`：
+
+| 页面 | 截图 |
+| --- | --- |
+| 概览 | `docs/images/manage-overview.png` |
+| 模型 | `docs/images/manage-model.png` |
+| 人设 | `docs/images/manage-persona.png` |
+| 声音 | `docs/images/manage-voice.png` |
+| 记忆 | `docs/images/manage-memory.png` |
+| Live2D | `docs/images/manage-live2d.png` |
+
+> 截图证明页面能真实加载与切换；它**不等于**下面"浏览器点击流程未验证"的结论已被推翻——
+> 截图脚本只做导航切换与抓图，未逐个走完表单填写、保存与错误提示的交互路径。
+
+### 未验证项与已知限制
+
+- **声音试听与应用的浏览器点击流程未单独走一遍。** 真实服务上验证的是 HTTP 接口与
+  落盘结果；`web/0002` 补丁的前端三个页面已通过类型检查与构建，并已用无头 Chrome
+  抓图确认可加载，但未走完表单填写与保存的交互路径。
+- **记忆搜索的语义检索未在真实嵌入模型下验证。** 验收运行的嵌入提供商未配置，
+  实测 `available=false` 并正确报告；"空结果 vs 不可用"的区分因此是真实成立的，
+  但同义召回质量属 V2-T04（表达学习）与既有 T04 记忆闭环的范围。
+- **声音试听未听到实际音频。** 本地 GPT-SoVITS 服务未在本轮启动，试听路径验证到
+  「明确报告不可用」为止；真实合成与试听属既有 T05 闭环，本轮未重跑。
+- **正式爱弥斯音色与 Live2D 模型仍缺**，因此本任务的示例标注（`is_official_voice=false`、
+  `is_official_model=false`）与"不提供无法加载的条目"是当前正确行为。依据：
+  [Live2D 制作记录](../references/character/live2d-production.md) 记明外观仅定稿到原稿，
+  抠图、拆层与 Cubism 绑定均未完成，**没有可用的 `.moc3` 运行模型**，并明确要求
+  "不替换上游示例模型、不修改运行配置、不把平面立绘标记为已完成 Live2D"；
+  `references/voice/` 下的语音合集为游戏实机录制，按既有结论（3D 空间混响、非纯净
+  干声）不作正式音色。本轮未使用这些素材，也未改动上游示例模型与模型字典的既有取值。
+- 与 V2-T03 的双窗口集成验收未执行：本任务完成**不等于**「首批可用」通过。

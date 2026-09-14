@@ -235,11 +235,15 @@ GitGuardian 告警 `[Finderlzy/Aemeath] DeepSeek API Key exposed on GitHub`
 | 补丁文件 | 目标仓库 | 作用 |
 | --- | --- | --- |
 | `docs/patches/web/0001-aemeath-web-client.patch` | `vendor/Open-LLM-VTuber-Web` | 协议协商（v2）、显示与播放端到端回执上报、迟到音频拒绝与静音保护、Aemeath 上下文与打断联动 |
-| `docs/patches/web/0002-aemeath-management-ui.patch` | `vendor/Open-LLM-VTuber-Web` | 管理界面（概览／模型／人设）与 `aemeath-management` API 客户端；管理窗口路由 |
+| `docs/patches/web/0002-aemeath-management-ui.patch` | `vendor/Open-LLM-VTuber-Web` | 管理界面与 `aemeath-management` API 客户端；管理窗口路由。V2-T01 含概览／模型／人设，V2-T02 增加声音／记忆／Live2D 三页 |
 
-**web 补丁按序套用**，`0002` 基于 `0001` 之后的 `App.tsx` 生成。重新生成 `0002`
-时必须先在 `0001` 已套用的树上做，否则 `git apply` 会在 `App.tsx` 报
-`patch does not apply`。
+**web 补丁按序套用**，`0002` 基于 `0001` 之后的 `App.tsx` 生成。
+
+> **重新生成 `0002` 时必须在 `0001` 已套用的树上做。** `0001` 自己也会改 `App.tsx`
+> （加入 `AemeathProvider` 的 import 与挂载）。若在未套用 `0001` 的树上生成，补丁会把
+> 那一行记成新增内容，套用时必然报 `patch does not apply`。2026-09-14 生成 V2-T02
+> 版本时踩到过这个坑；最终做法是先在干净树上 `git apply 0001`，再复制管理页文件并生成
+> 补丁，最后用另一个干净检出按序套用 `0001`→`0002`，核对 6 个文件与工作副本逐字节一致。
 
 套用命令：
 ```powershell

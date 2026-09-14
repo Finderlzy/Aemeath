@@ -51,3 +51,8 @@ __pycache__/
 .mypy_cache/
 .coverage
 htmlcov/
+
+# Local reference material (character art, video, voice recordings). Source
+# assets for future Live2D and voice work; large and machine-local, so they stay
+# out of source control. See references/character/live2d-production.md.
+references/

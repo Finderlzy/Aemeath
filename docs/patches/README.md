@@ -37,6 +37,11 @@ OpenAI SDK 自己构造 `httpx` 客户端，**不读取**环境里的代理与 T
 不会静默地降低安全性。未设置时返回 `None`，交回 SDK 的默认行为，因此
 普通环境（含正式部署）行为不变。
 
+补丁同时处理 `${VAR}` 形式的密钥：环境变量缺失时**直接抛
+`ValueError`**，不再有任何硬编码回退。上游 `config_manager` 本就会解析
+`${VAR}`，这里只是兜底；静默 fallback 会把配置错误掩盖成"能跑"，
+也曾导致真实密钥被写进补丁文件（2026-09-14 修复，见下）。
+
 ## 为什么需要改动
 
 上游 `AgentFactory.create_agent()` 用硬编码的 `if/elif` 分支选择 agent，
@@ -159,10 +164,41 @@ screen_summary_provider=runtime.bridge.current_screen_summary,
 ## 验证方式
 
 历史记录称补丁已验证可复现（原记载 2026-09-14，经 [T00 复核](https://github.com/Finderlzy/Aemeath/issues/1)
-判定为**笔误，实际执行于 2026-09-12**；该次复核未重跑补丁验证，下次按实施计划 T07 核对）：
+判定为**笔误，实际执行于 2026-09-12**；该次复核未重跑补丁验证，下次按实施计划 T07 核对）。
 
-- 按序 `git apply --check` 四个补丁对干净 `v1.2.1`（commit `3afa410`）全部成功；
-- 套用后文件与工作副本**逐字节一致**。
+**2026-09-14 密钥泄露修复后已重跑**（针对干净 `v1.2.1`，commit `3afa410`）：
+
+- 按序 `git apply --check` 四个补丁全部成功，且可实际套用；
+- 全部 **9 个被修改文件**（含 `frontend`）与工作副本**逐字节一致**
+  （`openai_compatible_llm.py` 的 `git hash-object` 为 `6f1f647`）；
+- `${VAR}` 三条路径实测：变量缺失抛 `ValueError`、变量存在正常解析、
+  字面密钥原样透传；
+- `pytest -q` 全绿（372 passed）。
+
+## 密钥泄露事件与修复（2026-09-14）
+
+GitGuardian 告警 `[Finderlzy/Aemeath] DeepSeek API Key exposed on GitHub`
+（pushed 2026-09-13 11:24:54 UTC）确认属实。
+
+**成因**：`0004` 的兜底逻辑写成 `os.environ.get(env_var) or "<字面密钥>"`，
+生成补丁时把本机真实密钥一并写进了 `docs/patches/0004-*.patch`，随
+`6c7850b` 进入 `main`（并进入 `v1.0.0` 标签）。
+
+**修复**：
+
+1. 删除硬编码回退，改为环境变量缺失时抛 `ValueError`（见上）；
+2. **修掉一个被掩盖的 `NameError`**：`import os` 原本写在
+   `_aemeath_http_client()` 函数体内，模块作用域没有 `os`，因此 `${VAR}`
+   分支一旦执行就会 `NameError`——硬编码回退让这条路径从未被真正走通。
+   已改为模块级 `import os`；
+3. 用干净上游重新生成 `0004` 补丁（不能只做文本替换：`index` 行与 hunk 行数都会变）；
+4. 轮换（吊销并重建）DeepSeek 密钥——历史重写无法撤回已被抓取的密钥，
+   轮换是唯一根本缓解；
+5. 重写 Git 历史清除旧值，并强制推送分支与标签；
+6. 本地残留清理：`vendor/` 工作副本、`__pycache__` 字节码、`logs/` 调试日志。
+
+**结论性约定：补丁与文档中不得出现字面密钥，`${VAR}` 是唯一允许形式。**
+`scripts/check-secrets.ps1` 用于提交前扫描。
 
 ## 客户端改动与补丁（T07 纳入交付）
 

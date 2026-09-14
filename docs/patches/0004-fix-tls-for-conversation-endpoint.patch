@@ -1,8 +1,16 @@
 diff --git a/src/open_llm_vtuber/agent/stateless_llm/openai_compatible_llm.py b/src/open_llm_vtuber/agent/stateless_llm/openai_compatible_llm.py
-index e38a332..65d2000 100644
+index e38a332..6f1f647 100644
 --- a/src/open_llm_vtuber/agent/stateless_llm/openai_compatible_llm.py
 +++ b/src/open_llm_vtuber/agent/stateless_llm/openai_compatible_llm.py
-@@ -21,6 +21,36 @@ from .stateless_llm_interface import StatelessLLMInterface
+@@ -3,6 +3,7 @@ This class is responsible for handling asynchronous interaction with OpenAI API
+ endpoints for language generation.
+ """
+ 
++import os
+ from typing import AsyncIterator, List, Dict, Any
+ from openai import (
+     AsyncStream,
+@@ -21,6 +22,34 @@ from .stateless_llm_interface import StatelessLLMInterface
  from ...mcpp.types import ToolCallObject
  
  
@@ -21,8 +29,6 @@ index e38a332..65d2000 100644
 +    Returns:
 +        An ``httpx.AsyncClient``, or ``None`` to let the SDK use its default.
 +    """
-+    import os
-+
 +    value = os.getenv("AEMEATH_TLS_INSECURE", "").strip()
 +    if value in ("", "0", "false"):
 +        return None
@@ -39,14 +45,20 @@ index e38a332..65d2000 100644
  class AsyncLLM(StatelessLLMInterface):
      def __init__(
          self,
-@@ -45,11 +75,16 @@ class AsyncLLM(StatelessLLMInterface):
+@@ -45,11 +74,22 @@ class AsyncLLM(StatelessLLMInterface):
          self.base_url = base_url
          self.model = model
          self.temperature = temperature
 +        resolved_key = llm_api_key
 +        if resolved_key and resolved_key.startswith("${") and resolved_key.endswith("}"):
 +            env_var = resolved_key[2:-1]
-+            resolved_key = os.environ.get(env_var) or "REDACTED-DEEPSEEK-KEY"
++            resolved_key = os.environ.get(env_var)
++            if not resolved_key:
++                raise ValueError(
++                    f"Environment variable {env_var} is not set, but the "
++                    "conversation endpoint API key refers to it. Set the "
++                    "variable, or put the key directly in the config."
++                )
          self.client = AsyncOpenAI(
              base_url=base_url,
              organization=organization_id,

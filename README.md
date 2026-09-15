@@ -162,6 +162,12 @@ Aemeath 首期正式语音方案为本地 GPT-SoVITS（`http://127.0.0.1:9880/tt
   powershell -File scripts\stop_gpt_sovits.ps1 -Port 9880
   ```
 
+> **训练新音色另需前置条件。** 本地 GPT-SoVITS 固定版本（`48b1a01`）在 Windows 单卡下
+> **默认无法完成 SoVITS 训练**：`s2_train.py` 无条件启用 DDP，训练在 `backward()` 处以
+> `0xC0000005` 崩溃，且无法在 Python 层捕获。可用的最小补丁见
+> [上游补丁说明](docs/patches/upstream/README.md)；完整实测结论见
+> [验收记录 · V2-T05](docs/acceptance.md#二十一v2-t05-训练接入技术验证2026-09-15)。
+
 ### 3. 本地 LM Studio (Embedding) 准备
 - 打开 LM Studio，搜索并下载 `text-embedding-bge-large-zh-v1.5`。
 - 在“Local Server”选项卡中选择该模型，端口设为 `1234`，点击“Start Server”（监听 `http://127.0.0.1:1234/v1`）。

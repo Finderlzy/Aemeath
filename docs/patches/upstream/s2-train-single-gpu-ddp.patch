@@ -1,0 +1,135 @@
+diff --git a/GPT_SoVITS/s2_train.py b/GPT_SoVITS/s2_train.py
+index 333e6a0..1b6a158 100644
+--- a/GPT_SoVITS/s2_train.py
++++ b/GPT_SoVITS/s2_train.py
+@@ -77,44 +77,51 @@ def run(rank, n_gpus, hps):
+         writer = SummaryWriter(log_dir=hps.s2_ckpt_dir)
+         writer_eval = SummaryWriter(log_dir=os.path.join(hps.s2_ckpt_dir, "eval"))
+ 
+-    dist.init_process_group(
+-        backend="gloo" if os.name == "nt" or not torch.cuda.is_available() else "nccl",
+-        init_method="env://?use_libuv=False",
+-        world_size=n_gpus,
+-        rank=rank,
+-    )
++    use_ddp = n_gpus > 1
++    if use_ddp:
++        dist.init_process_group(
++            backend="gloo" if os.name == "nt" or not torch.cuda.is_available() else "nccl",
++            init_method="env://?use_libuv=False",
++            world_size=n_gpus,
++            rank=rank,
++        )
+     torch.manual_seed(hps.train.seed)
++    global device
+     if torch.cuda.is_available():
+         torch.cuda.set_device(rank)
++        device = f"cuda:{rank}"
+ 
+     train_dataset = TextAudioSpeakerLoader(hps.data, version=hps.model.version)
+-    train_sampler = DistributedBucketSampler(
+-        train_dataset,
+-        hps.train.batch_size,
+-        [
+-            32,
+-            300,
+-            400,
+-            500,
+-            600,
+-            700,
+-            800,
+-            900,
+-            1000,
+-            1100,
+-            1200,
+-            1300,
+-            1400,
+-            1500,
+-            1600,
+-            1700,
+-            1800,
+-            1900,
+-        ],
+-        num_replicas=n_gpus,
+-        rank=rank,
+-        shuffle=True,
+-    )
++    if use_ddp:
++        train_sampler = DistributedBucketSampler(
++            train_dataset,
++            hps.train.batch_size,
++            [
++                32,
++                300,
++                400,
++                500,
++                600,
++                700,
++                800,
++                900,
++                1000,
++                1100,
++                1200,
++                1300,
++                1400,
++                1500,
++                1600,
++                1700,
++                1800,
++                1900,
++            ],
++            num_replicas=n_gpus,
++            rank=rank,
++            shuffle=True,
++        )
++    else:
++        train_sampler = None
+     collate_fn = TextAudioSpeakerCollate(version=hps.model.version)
+     train_loader = DataLoader(
+         train_dataset,
+@@ -196,7 +203,7 @@ def run(rank, n_gpus, hps):
+         betas=hps.train.betas,
+         eps=hps.train.eps,
+     )
+-    if torch.cuda.is_available():
++    if use_ddp:
+         net_g = DDP(net_g, device_ids=[rank], find_unused_parameters=True)
+         net_d = DDP(net_d, device_ids=[rank], find_unused_parameters=True)
+     else:
+@@ -238,7 +245,7 @@ def run(rank, n_gpus, hps):
+                     torch.load(hps.train.pretrained_s2G, map_location="cpu", weights_only=False)["weight"],
+                     strict=False,
+                 )
+-                if torch.cuda.is_available()
++                if use_ddp
+                 else net_g.load_state_dict(
+                     torch.load(hps.train.pretrained_s2G, map_location="cpu", weights_only=False)["weight"],
+                     strict=False,
+@@ -256,7 +263,7 @@ def run(rank, n_gpus, hps):
+                 net_d.module.load_state_dict(
+                     torch.load(hps.train.pretrained_s2D, map_location="cpu", weights_only=False)["weight"], strict=False
+                 )
+-                if torch.cuda.is_available()
++                if use_ddp
+                 else net_d.load_state_dict(
+                     torch.load(hps.train.pretrained_s2D, map_location="cpu", weights_only=False)["weight"],
+                 ),
+@@ -323,7 +330,8 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, schedulers, scaler, loade
+     if writers is not None:
+         writer, writer_eval = writers
+ 
+-    train_loader.batch_sampler.set_epoch(epoch)
++    if hasattr(train_loader.batch_sampler, "set_epoch"):
++        train_loader.batch_sampler.set_epoch(epoch)
+     global global_step
+ 
+     net_g.train()
+@@ -616,7 +624,7 @@ def evaluate(hps, generator, eval_loader, writer_eval):
+                         text_lengths,
+                         test=test,
+                     )
+-                    if torch.cuda.is_available()
++                    if use_ddp
+                     else generator.infer(
+                         ssl,
+                         spec,

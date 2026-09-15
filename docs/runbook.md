@@ -463,11 +463,50 @@ cd E:\WorkSpace\Aemeath
 > 表现为大量 `sqlite3.OperationalError: unable to open database file`。
 > 把 `TEMP`/`TMP` 指向工作区内可写目录即可，这不是产品缺陷。
 
+## 训练接入验证（V2-T05）
+
+真实验证本地 GPT-SoVITS 的训练接入，不经过管理界面，也不需要训练向导。
+
+```powershell
+cd E:\WorkSpace\Aemeath
+$env:PYTHONIOENCODING = "utf-8"
+
+# 1) 环境预检：上游版本、torch/CUDA、GPU、素材、预处理产物、TTS 服务状态
+.\vendor\Open-LLM-VTuber\.venv\Scripts\python.exe scripts\verify_training_integration.py --precheck
+
+# 2) 数据预处理（三段，约 30 秒）
+.\vendor\Open-LLM-VTuber\.venv\Scripts\python.exe scripts\verify_training_integration.py --preprocess
+
+# 3) 小样本训练（约 2 分钟，产出权重）
+.\vendor\Open-LLM-VTuber\.venv\Scripts\python.exe scripts\verify_training_integration.py --train --epochs 2 --batch-size 1
+
+# 4) 取消测试（需先启动 9880 服务，验证不误杀既有服务）
+.\vendor\Open-LLM-VTuber\.venv\Scripts\python.exe scripts\verify_training_integration.py --cancel
+
+# 5) 资源争用测试（训练与实时 TTS 并存）
+.\vendor\Open-LLM-VTuber\.venv\Scripts\python.exe scripts\verify_training_integration.py --contention
+
+# 6) 真实合成（用产物试听）
+.\vendor\Open-LLM-VTuber\.venv\Scripts\python.exe scripts\verify_training_integration.py --synthesize
+
+# 重试边界实测
+.\vendor\Open-LLM-VTuber\.venv\Scripts\python.exe scripts\probe_training_retry.py
+```
+
+**运行前提**：固定版本上游 `E:\WorkSpace\Tools\GPT-SoVITS`（`GPT_SOVITS_DIR` 可覆盖）。
+训练前须确认 `s2_train.py` 已应用单卡 DDP 修复
+（`docs/patches/upstream/s2-train-single-gpu-ddp.patch`）——**未应用时 Windows 单卡训练必然
+以 `0xC0000005` 崩溃**，且无法在 Python 层捕获。
+
+报告写入 `data/acceptance/training-integration/`（已排除出版本管理）。
+实测读数见 [验收记录第二十一节](acceptance.md#二十一v2-t05-训练接入技术验证2026-09-15)。
+
 ## 日志
 
 - 上游运行日志：`vendor/Open-LLM-VTuber/logs/debug_<date>.log`
 - Aemeath 自有日志目录：`logs/`（已排除出版本管理）
 - 轮次指标：`logs/turns.jsonl`（只在产生轮次后创建）
+- 训练验证报告：`data/acceptance/training-integration/`（已排除出版本管理）
 
 这些目录由运行时按需生成，不在版本管理中；收尾清理后下次启动会重新建立。
 
@@ -485,14 +524,14 @@ cd E:\WorkSpace\Aemeath
 - 干净 `v1.2.1` 检出按序套用 0001→0004 成功，8 个文件与工作副本逐字节一致
   （T01 重新核对；补丁 0004 见 [补丁清单](patches/README.md)）
 - 客户端 `npm run build:web` 成功，产物与部署文件 SHA256 相同
-- `pytest` **533 项通过, 7 deselected**（2026-09-15 V2-T04 复跑，见
-  [验收记录第二十节](acceptance.md#二十v2-t04-表达与黑话学习2026-09-15)）。7 项 `live_api` 默认排除，属预期。
+- `pytest` **583 项通过, 7 deselected**（2026-09-15 V2-T05 复跑，见
+  [验收记录第二十一节](acceptance.md#二十一v2-t05-训练接入技术验证2026-09-15)）。7 项 `live_api` 默认排除，属预期。
   历史基线：`71376f0` 上 244 项（[验收记录第九节](acceptance.md#九t00-证据复核与回归基线2026-09-13)），
   T01 新增 32 项主动语音、送达计数、TTS 引擎归属与 `end_turn` 顺序回归，
   T02 新增 12 项屏幕观察生命周期回归（迟到响应、关闭态不捕获），
   T05 接入前新增 42 项 GPT-SoVITS 回归（13 项真实上游引擎 + 29 项适配器，
   见 [验收记录第十节](acceptance.md#十当前回归基线gpt-sovits-接入后2026-09-13)）；
-  V2-T01 为 410 项、V2-T02 为 460 项、V2-T03 为 474 项、V2-T04 为 533 项。
+  V2-T01 为 410 项、V2-T02 为 460 项、V2-T03 为 474 项、V2-T04 为 533 项、V2-T05 为 583 项。
   此处原记 330 项、更早记 224 项（160 + 64），均为补齐真实链路回归之前的旧数字，已更正。
 - 主动输出经真实上游生成器入口（`ServiceContext._install_aemeath_proactive_generator()`）
   产生**非空且可解码**的音频帧；课堂模式下不合成、不播放（T01）
@@ -500,6 +539,14 @@ cd E:\WorkSpace\Aemeath
   等待视觉响应期间关闭观察时缓存与出站帧都保持空（T02）
 - 真实服务启动后后台任务确实运行（日志 `Aemeath background tasks started (2)`），
   主动调度器可在无客户端信号时自行发起一轮
+- 训练接入真实验证（V2-T05）：预处理三段全部退出码 0（约 27s）产出五个上游要求的产物；
+  小样本训练 119.35s 完成、峰值显存 6087MB、产出 81.07MB 权重；产物真实合成 3.52s 音频
+  （RMS 1576，非静音）并经 SenseVoice 回转识别为「你好，我是艾尼斯。今天天气不错。」；
+  取消训练后用户既有 9880 服务（PID 16344）存活且 HTTP 200；训练与实时 TTS 并存时合成
+  0.95s 成功
+- 训练接入的阻塞事实（V2-T05）：固定版本上游 `48b1a01` 的 `s2_train.py` 无条件启用 DDP，
+  Windows 单卡训练在 `backward()` 处以 `0xC0000005` 崩溃且无法在 Python 层捕获；
+  应用 `docs/patches/upstream/s2-train-single-gpu-ddp.patch` 后同一配置训练成功
 
 **上表为 2026-09-12 的实测记录。** 其中原列「尚未验证」的四项此后均已补齐：
 真实对话模型 API 往返（DeepSeek 真实对话 + 记忆提取）、麦克风实际采集（本地 SenseVoice）、

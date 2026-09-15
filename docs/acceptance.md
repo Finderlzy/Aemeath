@@ -1194,3 +1194,163 @@ hash 产物、部署到 `frontend/`，并**断言部署的 `index.html` 引用�
 `scripts/check-secrets.ps1` 扫描 125 个文件全部 PASS。
 
 
+## 二十一、V2-T05 训练接入技术验证（2026-09-15）
+
+**任务**：[#18](https://github.com/Finderlzy/Aemeath/issues/18)（V2-T05，V2-M4 声音训练向导）。
+**基线**：远端 `main` 的 `5342882`，任务分支 `issue-18-training-integration-verification`。
+**范围**：不接管理页面的前提下，用隔离任务真实验证本地 GPT-SoVITS 训练接入的可行性，为
+V2-T06 的适配选型定案。**本任务不实现训练向导，也不修改上游源码交付。**
+
+### 结论摘要
+
+**训练接入技术上可行，但固定版本的上游在本机 Windows 单卡环境下默认无法完成训练。** 已实测定
+位到根因（`s2_train.py` 无条件启用 DDP），并用最小上游补丁验证修复有效：真实小样本训练
+119.35s 完成并产出 81MB 权重，产物经真实合成与 ASR 回转确认可听可识别。该补丁是 V2-T06 的
+**前置条件**，不是本任务交付的代码。
+
+### 上游固定版本与依赖事实
+
+| 项 | 实测值 |
+| --- | --- |
+| 上游路径 | `E:\WorkSpace\Tools\GPT-SoVITS`（`GPT_SOVITS_DIR` 可覆盖） |
+| 固定提交 | `48b1a01`（**有未提交改动**，见下） |
+| Python | 3.11.16 |
+| torch | 2.11.0+cu128，CUDA 可用 |
+| GPU | RTX 5060 Laptop，8151MB（训练前已用 ~1.4GB） |
+| 上游既有改动 | `GPT_SoVITS/TTS_infer_pack/TTS.py` 的 torchcodec/soundfile 兼容补丁（会话前已存在，本任务未修改） |
+| 训练脚本 | `s2_train.py`（SoVITS）、`s1_train.py`（GPT）；由 `Popen(cmd, shell=True)` 以 `python -s <script> --config <tmp.json>` 拉起 |
+
+上游**没有可导入的训练 API**（`test_training_has_no_importable_entry_point` 钉住），因此适配层
+只能是进程编排。训练前本机 `logs/` 不存在、`SoVITS_weights*/` 与 `GPT_weights*/` 全空，即
+**此前从未运行过训练**，本次为该环境的首次真实训练。
+
+### 验收矩阵（七项逐项对照）
+
+| 验收项 | 结论 | 证据 |
+| --- | --- | --- |
+| 读取固定版本 | 通过 | `fingerprint_upstream()` 输出路径、提交 `48b1a01`、脏工作区标记；契约测试 16 项对真实上游文件断言 |
+| 可编排入口 | 通过 | 由 Python 代码（非 Gradio）经 `TrainingJob.launch()` 拉起，状态机可观测；真实训练 `succeeded` |
+| 取消且不误杀既有服务 | 通过 | 训练 PID 5896/9672 被终止；**用户既有服务 PID 16344 全程存活**，取消前后均 HTTP 200 |
+| 重试边界 | 通过 | 四类实测（见下）；取消/基础设施失败可重试，无产物失败拒绝重试 |
+| 产物识别与真实试听 | 通过 | 定位 `aemeath_verify_v2_e2_s200.pth`（81.07MB）；真实合成 3.52s/112640 帧音频，RMS 1576，经 SenseVoice 回转识别 |
+| 资源争用 | 通过 | 训练与实时 TTS 并存成功；合成 0.95s（单独 1.61s），显存峰值 4181MB/8151MB，无 OOM |
+| 失败不得标记通过 | 遵守 | 首次两次真实训练均失败并如实记录，修复后才判定通过 |
+
+### 真实执行记录
+
+**预处理**（`--preprocess`，全部退出码 0）：
+`1-get-text` 11.76s → `2-get-hubert-wav32k` 9.67s → `3-get-semantic` 5.33s，合计约 27s。
+产出五个上游要求的产物：`2-name2text.txt`（1026 字节）、`3-bert/`、`4-cnhubert/`、`5-wav32k/`、
+`6-name2semantic.tsv`（1882 字节）。
+
+**训练**（`--train --epochs 2 --batch-size 1`）：状态 `succeeded`，耗时 **119.35s**，峰值显存
+**6087MB**，产出 `aemeath_verify_v2_e1_s100.pth` 与 `aemeath_verify_v2_e2_s200.pth`（各 81.07MB）。
+
+**真实试听**：将新权重经 api_v2 `set_sovits_weights` 载入后合成
+「你好，我是爱弥斯。今天天气不错。」，得到 3.52s / 225324 字节 WAV（peak 13616、RMS 1576，非静音）。
+再用项目 SenseVoice 回转该音频，识别结果为
+**「你好，我是艾尼斯。今天天气不错。」** —— 除专名「爱弥斯」被识别为同音「艾尼斯」外，
+整句结构与用词完全一致。**该语音可听且可识别，构成产物可用的实证。**
+
+> 专名偏差的原因尚未定案：本次仅训练 SoVITS 分支、未训练 GPT 分支，且素材仅 18.48 秒。
+> 不作音色质量或专名发音的达标结论。
+
+### 开发中发现并修复的三个真实缺陷
+
+前两项属于本任务实现，第三项属于上游。
+
+1. **缺少 `s2config_path` 导致语义提取步骤失败**。`3-get-semantic.py` 直接打开该环境变量，
+   缺失时报 `TypeError: expected str, bytes or os.PathLike object, not NoneType`。上游 WebUI
+   会传入，命令行调用者必须自行提供。
+2. **缺少分片合并步骤，训练拒绝启动**。`1-get-text.py` 只写 `2-name2text-0.txt`，
+   `3-get-semantic.py` 只写 `6-name2semantic-0.tsv`；合并成 `2-name2text.txt` /
+   `6-name2semantic.tsv` 的动作发生在 **WebUI 内**而非任何脚本中。命令行调用不补齐这一步，
+   上游 `check_for_existance(is_train=True)` 会直接拒绝。
+3. **上游 `s2_train.py` 无条件启用 DDP，Windows 单卡必然崩溃**。见下节。
+
+### 上游缺陷：单卡 DDP 导致访问违例（本任务的阻塞项）
+
+**现象**：Windows 单卡下训练在第一个训练步崩溃，子进程以 Windows 退出码 **`3221225477`**
+（`0xC0000005`，访问违例）终止。数据集加载与预训练权重加载均成功（`All keys matched
+successfully`），崩溃点位于 `s2_train.py:428` 的 `scaler.scale(loss_disc_all).backward()`。
+**该错误无法在 Python 层捕获**，因此表现为「无栈可查的崩溃」。
+
+**根因**：`s2_train.py` 的 `main()` 用 `n_gpus = torch.cuda.device_count()` 取卡数，随后
+**无条件** `mp.spawn` + `dist.init_process_group` + `DistributedDataParallel`，从不判断
+`n_gpus > 1`；`gpu_numbers` 配置只影响 `CUDA_VISIBLE_DEVICES`，无法绕过。仅设
+`CUDA_VISIBLE_DEVICES=0` 时 `device_count()` 为 1，**仍然走 DDP 路径并同样崩溃**（已实测）。
+
+**已核对该缺陷在上游仍然开放**：[RVC-Boss/GPT-SoVITS#2806](https://github.com/RVC-Boss/GPT-SoVITS/issues/2806)
+描述了完全相同的现象、退出码与疑似根因，且指出 `s1_train.py` 已有同类修复（#2744）但
+`s2_train.py` 未覆盖。上游同时提供的 `s2_train_v3_lora.py` **已经带有** `use_ddp = n_gpus > 1`
+判断，但该脚本硬编码 V3/V4 的数据加载器，**不能用于 v2**。
+
+**验证修复**：按 issue #2806 的建议加 `use_ddp = n_gpus > 1` 守卫，并补齐非 DDP 路径所需的
+设备放置（原代码把 `device` 硬编码为 `"cpu"`，依赖 DDP 的 `device_ids` 搬模型，因此非 DDP
+路径会报 `Expected all tensors to be on the same device`）。补丁见
+`docs/patches/upstream/s2-train-single-gpu-ddp.patch`。加补丁后同一配置**训练成功**，
+即崩溃确由 DDP 引起。
+
+**这对 V2-T06 的含义**：向导若要真正训练，必须先让运行环境带上该补丁（或升级到上游修复版本）。
+**本任务不把上游补丁纳入交付代码**；不改上游、只记录并给出补丁文件。训练是否算「已接入」取决于
+该前置条件是否被满足，故 V2-T06 的接口设计**不得假定裸上游可直接训练**。
+
+### 重试边界（`scripts/probe_training_retry.py`）
+
+| 情形 | 实测状态 | 是否可重试 | 理由 |
+| --- | --- | --- | --- |
+| 训练中被取消 | `cancelled` | **是** | 已终止训练进程，可重新启动 |
+| 上游因缺产物拒绝 | `failed` / infrastructure | **是** | 基础设施类失败，补齐前置后可重启 |
+| 进程被外部杀死 | `failed` / infrastructure | **是** | 同断电／用户强杀场景 |
+| 退出码 0 但无产物 | `failed` / material | **否** | 直接重试会复现同一结果，须先修素材 |
+
+**判据要点**：退出码 0 **不等于**成功——必须在权重目录找到产物才算成功
+（`test_success_without_artefacts_is_not_success`）。运行中的任务拒绝重试，因为上游生成的
+临时配置写在**共享 `TEMP/`** 目录，并发训练会互相覆盖。
+
+### 资源争用（`--contention`）
+
+| 指标 | 单独 | 训练并存 |
+| --- | --- | --- |
+| 合成耗时 | 1.61s | **0.95s** |
+| 合成字节 | 165164 | 157484 |
+| 音频 RMS | 1822（可听） | 1735（可听） |
+| 显存占用 | 2917MB | 4181MB（峰值） |
+
+**结论**：8GB 显存下训练与实时 TTS **可以并存**，未观察到 OOM 或合成失败。存放期间余量约
+3970MB，但训练峰值曾达 6087MB；样本量为单次实测，**不构成「任意素材规模都安全」的结论**，
+V2-T06 仍应在训练前给出显存预检。
+
+### 实现产物
+
+| 产物 | 位置 |
+| --- | --- |
+| 训练编排（上游指纹、命令构造、进程控制、产物定位、重试判定） | `aemeath/training/gpt_sovits.py` |
+| 环境预检（版本／torch／GPU／素材／产物／服务） | `aemeath/training/probe.py` |
+| 端到端验证入口 | `scripts/verify_training_integration.py` |
+| 重试边界探针 | `scripts/probe_training_retry.py` |
+| 上游修复补丁（供 V2-T06 使用，不参与本仓库构建） | `docs/patches/upstream/s2-train-single-gpu-ddp.patch` |
+| 真实运行报告 | `data/acceptance/training-integration/report.json`、`retry-boundaries.json` |
+
+### 回归基线
+
+`583 passed, 7 deselected`（本次新增 50 项：编排 24、上游契约 16、预检 10）。
+`scripts/check-secrets.ps1` 扫描 135 个受版本管理文件全部 PASS。
+
+### 未验证项与已知限制
+
+- **未做音色质量与专名发音达标结论。** 素材仅 18.48 秒／4 条，远低于常规建议；本次只验证
+  「能否跑通并产出可用产物」，不评价像不像爱弥斯。
+- **未训练 GPT（`s1`）分支。** 本次只跑 SoVITS 分支；完整向导的「导入→训练→试听→应用」尚
+  未由本任务实现。
+- **补丁未上游化。** `docs/patches/upstream/` 下的补丁只在本次验证中应用过，**未合入上游、
+  也未纳入 Aemeath 交付代码**；V2-T06 采用前需确认其在新环境仍适用。
+- **并发结论基于单次实测**，未覆盖长训练、大素材或同时多次合成。
+- **上游工作副本仍是脏的**。当前未提交改动为：`GPT_SoVITS/TTS_infer_pack/TTS.py`（torchcodec
+  兼容补丁，会话前已存在）、`GPT_SoVITS/s2_train.py`（本次验证用单卡 DDP 补丁）、
+  `GPT_SoVITS/configs/tts_infer.yaml`（试听时将权重切到新模型所写入）与
+  `GPT_SoVITS/pretrained_models/.gitignore`。该工作副本**不属于本仓库版本管理范围**，
+  本仓库只保存补丁文件本身。
+- 未测多卡、未测非 Windows 平台。
+
+

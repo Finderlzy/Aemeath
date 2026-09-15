@@ -65,6 +65,45 @@ try {
     & cmd /c "npm.cmd run build"
     if ($LASTEXITCODE -ne 0) { throw "electron-vite build failed (exit $LASTEXITCODE)" }
 
+    # --- 2b. Build and deploy the management page -----------------------------
+    #
+    # The management window is a BrowserWindow that loads
+    # http://127.0.0.1:12393/?page=manage — i.e. the WEB bundle served by the
+    # backend, not the Electron renderer built above. Skipping this step leaves
+    # the management window running whatever stale page is already deployed in
+    # the backend's frontend/ directory.
+    #
+    # That is not a theoretical concern: V2-T03's "saved settings take effect"
+    # path was dead on the real desktop because the deployed page predated the
+    # code that notifies the main process. The Electron build alone cannot catch
+    # it, because the page is served over HTTP.
+    Write-Host 'Building and deploying the management page...'
+    & cmd /c "npm.cmd run build:web"
+    if ($LASTEXITCODE -ne 0) { throw "vite build:web failed (exit $LASTEXITCODE)" }
+
+    $webDist = Join-Path $Web 'dist\web'
+    $frontend = Join-Path $Root 'vendor\Open-LLM-VTuber\frontend'
+    if (-not (Test-Path $frontend)) { throw "Backend frontend directory not found: $frontend" }
+
+    # Remove the previous hashed bundles so stale files cannot accumulate and
+    # shadow the current build via the old index.html.
+    Get-ChildItem (Join-Path $frontend 'assets') -Filter 'main-*.js' -ErrorAction SilentlyContinue |
+        Remove-Item -Force -ErrorAction SilentlyContinue
+    Get-ChildItem (Join-Path $frontend 'assets') -Filter 'main-*.css' -ErrorAction SilentlyContinue |
+        Remove-Item -Force -ErrorAction SilentlyContinue
+    Copy-Item (Join-Path $webDist 'assets\*') (Join-Path $frontend 'assets') -Recurse -Force
+    Copy-Item (Join-Path $webDist 'index.html') (Join-Path $frontend 'index.html') -Force
+
+    # Verify the deployed page is the one just built, so a silent copy failure
+    # cannot masquerade as a successful build.
+    $deployedHtml = Get-Content (Join-Path $frontend 'index.html') -Raw
+    $builtAssets = (Get-ChildItem (Join-Path $webDist 'assets') -Filter '*.js').Name
+    $missing = @($builtAssets | Where-Object { $deployedHtml -notmatch [regex]::Escape($_) })
+    if ($missing.Count -gt 0) {
+        throw "Deployed index.html does not reference the freshly built asset(s): $($missing -join ', ')"
+    }
+    Write-Host "Management page deployed to: $frontend"
+
     # --- 3. Assemble the runnable directory -----------------------------------
     Write-Host "Assembling: $Release"
     Remove-Item $Release -Recurse -Force -ErrorAction SilentlyContinue

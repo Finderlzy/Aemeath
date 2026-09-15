@@ -705,7 +705,7 @@ index eee7412..4a993a8 100644
      this.updateTrayMenu();
      this.onModeChange(mode);
 diff --git a/src/main/window-manager.ts b/src/main/window-manager.ts
-index 3161fee..46598cc 100644
+index 3161fee..5e7ef03 100644
 --- a/src/main/window-manager.ts
 +++ b/src/main/window-manager.ts
 @@ -4,8 +4,39 @@ import {
@@ -851,7 +851,7 @@ index 3161fee..46598cc 100644
      this.setupWindowEvents();
      this.loadContent();
  
-@@ -88,19 +188,148 @@ export class WindowManager {
+@@ -88,19 +188,165 @@ export class WindowManager {
        this.window?.webContents.send('window-fullscreen-change', false);
      });
  
@@ -871,32 +871,49 @@ index 3161fee..46598cc 100644
 +   * "已保存" and "已生效" the same event for these presentation values.
 +   */
 +  reloadSettings(): void {
-+    const loaded = loadDesktopSettings();
-+    this.settings = loaded.settings;
-+    this.settingsSource = loaded.source;
-+
 +    if (!this.window || this.currentMode !== 'pet') return;
-+    // A user-moved/resized window keeps its explicit position only while the
-+    // size is unchanged; a new configured size re-anchors to the corner.
++
++    // Ask the backend, which is the authority: it read the config the save was
++    // written to, including a custom `AEMEATH_CONFIG` that this process cannot
++    // locate by path. The file read is only a fallback for a backend that has
++    // not started yet.
++    //
++    // Always re-anchor with the answer. An earlier version only did so when the
++    // backend value differed from the *file-derived* one, which meant a machine
++    // where the file scan finds nothing (every packaged path misses) compared
++    // defaults against a correct backend answer and could skip the update.
++    void fetchDesktopSettings()
++      .then((fromBackend) => {
++        if (!fromBackend) {
++          const loaded = loadDesktopSettings();
++          this.settings = loaded.settings;
++          this.settingsSource = loaded.source;
++        } else {
++          this.settings = fromBackend;
++          this.settingsSource = 'backend';
++        }
++        this.reanchor();
++      })
++      .catch(() => {
++        const loaded = loadDesktopSettings();
++        this.settings = loaded.settings;
++        this.settingsSource = loaded.source;
++        this.reanchor();
++      });
++  }
++
++  /**
++   * Re-place the window with the current settings.
++   *
++   * The user's own drag/resize is dropped when a configured size arrives: the
++   * size they just saved is the newer instruction.
++   */
++  private reanchor(): void {
++    if (!this.window || this.currentMode !== 'pet') return;
 +    this.placement.width = undefined;
 +    this.placement.height = undefined;
 +    this.applyPetBounds();
 +    this.window.webContents.send('desktop-placement-changed', this.window.getBounds());
-+
-+    // The backend is authoritative and may know a config the file scan cannot
-+    // find (a custom `AEMEATH_CONFIG`, for example). Its answer, when it
-+    // arrives, supersedes the file-derived one; the file value is what the
-+    // window has already used, so a slow backend costs nothing.
-+    void fetchDesktopSettings().then((fromBackend) => {
-+      if (!fromBackend || !this.window || this.currentMode !== 'pet') return;
-+      const changed = fromBackend.characterWidth !== this.settings.characterWidth
-+        || fromBackend.characterHeight !== this.settings.characterHeight;
-+      if (!changed) return;
-+      this.settings = fromBackend;
-+      this.settingsSource = 'backend';
-+      this.applyPetBounds();
-+      this.window.webContents.send('desktop-placement-changed', this.window.getBounds());
-+    });
 +  }
 +
 +  /** The settings currently in use, and where they came from. */
@@ -1004,7 +1021,7 @@ index 3161fee..46598cc 100644
  
      this.window.on('maximize', () => {
        this.window?.webContents.send('window-maximized-change', true);
-@@ -114,9 +343,26 @@ export class WindowManager {
+@@ -114,9 +360,26 @@ export class WindowManager {
        const window = this.getWindow();
        if (window) {
          const bounds = window.getBounds();
@@ -1032,7 +1049,7 @@ index 3161fee..46598cc 100644
        }
      });
  
-@@ -196,38 +442,28 @@ export class WindowManager {
+@@ -196,38 +459,28 @@ export class WindowManager {
      this.window.setBackgroundColor('#00000000');
  
      this.window.setAlwaysOnTop(true, 'screen-saver');
@@ -1083,7 +1100,7 @@ index 3161fee..46598cc 100644
      if (isMac) {
        this.window.setIgnoreMouseEvents(true);
        this.window.setVisibleOnAllWorkspaces(true, {
-@@ -239,7 +475,108 @@ export class WindowManager {
+@@ -239,7 +492,119 @@ export class WindowManager {
  
      this.window.webContents.send('mode-changed', 'pet');
    }
@@ -1101,12 +1118,23 @@ index 3161fee..46598cc 100644
 +    const target = this.targetDisplay();
 +    const { x, y, width, height } = target.workArea;
 +
++    // The **configured** size, not the module default.
++    //
++    // This method is what `reloadSettings` calls after the management window
++    // saves, and it previously read the hardcoded `CHARACTER_WIDTH`/`_HEIGHT`.
++    // Startup therefore honoured the setting (that path goes through
++    // `initialPetBounds`, which does read it) while a live save silently
++    // reverted the window to the built-in default — the reported symptom being
++    // "保存 succeeds but nothing changes" even with IPC working.
++    const configuredWidth = this.placement.width ?? this.settings.characterWidth;
++    const configuredHeight = this.placement.height ?? this.settings.characterHeight;
++
 +    const winWidth = Math.min(
-+      this.placement.width ?? CHARACTER_WIDTH,
++      configuredWidth,
 +      Math.max(CHARACTER_WIDTH, width - WORK_AREA_MARGIN * 2),
 +    );
 +    const winHeight = Math.min(
-+      this.placement.height ?? CHARACTER_HEIGHT,
++      configuredHeight,
 +      Math.max(CHARACTER_HEIGHT, height - WORK_AREA_MARGIN * 2),
 +    );
 +
@@ -1193,7 +1221,7 @@ index 3161fee..46598cc 100644
    getWindow(): BrowserWindow | null {
      return this.window;
    }
-@@ -340,4 +677,43 @@ export class WindowManager {
+@@ -340,4 +705,43 @@ export class WindowManager {
    getCurrentMode(): 'window' | 'pet' {
      return this.currentMode;
    }
@@ -1349,10 +1377,10 @@ index e94cc73..cfc125f 100644
                              </BrowserProvider>
 diff --git a/src/renderer/src/components/aemeath/desktop-page.tsx b/src/renderer/src/components/aemeath/desktop-page.tsx
 new file mode 100644
-index 0000000..3861919
+index 0000000..2ae4837
 --- /dev/null
 +++ b/src/renderer/src/components/aemeath/desktop-page.tsx
-@@ -0,0 +1,258 @@
+@@ -0,0 +1,263 @@
 +/* eslint-disable @typescript-eslint/no-explicit-any */
 +/**
 + * Desktop and subtitle settings (v2 task V2-T03).
@@ -1376,7 +1404,6 @@ index 0000000..3861919
 +
 +import {
 +  fetchDesktopSettings,
-+  fetchOverview,
 +  ManagementError,
 +  saveDesktopSettings,
 +  type FieldError,
@@ -1436,17 +1463,14 @@ index 0000000..3861919
 +    try {
 +      const data = await fetchDesktopSettings();
 +      apply(data);
++      // The revision comes from the same response as the values, so the form
++      // and the revision it will save with can never describe different reads.
++      setRevision(data.revision ?? '');
 +      setLoadError('');
 +    } catch (error) {
 +      // A failed read is its own state: showing the defaults as if they were
 +      // the user's settings would invite them to "fix" the wrong values.
 +      setLoadError(error instanceof Error ? error.message : String(error));
-+    }
-+    try {
-+      const overview = await fetchOverview();
-+      setRevision(overview.saved_revision);
-+    } catch {
-+      setRevision('');
 +    }
 +  }, [apply]);
 +
@@ -1468,14 +1492,20 @@ index 0000000..3861919
 +        expectedRevision: revision,
 +      });
 +      if (result.ok) {
++        // Adopt the revision this save produced, so an immediate second save
++        // does not trip over its own write.
++        if (result.saved_revision) setRevision(result.saved_revision);
 +        // Tell the main process, which owns the character window's geometry, so
 +        // the change takes effect now rather than at the next restart. Without
 +        // this the page would report a save that the character never adopted —
 +        // exactly the "saved but not in effect" state the UI must not show.
++        const notified = Boolean((window as any).api?.notifyDesktopSettingsChanged);
 +        (window as any).api?.notifyDesktopSettingsChanged?.();
 +        setNotice({
 +          kind: 'ok',
-+          text: '已保存并已生效：角色窗口与字幕已按新设置调整。',
++          text: notified
++            ? '已保存并已生效：角色窗口与字幕已按新设置调整。'
++            : '已保存。当前在浏览器中打开，角色窗口要重新启动桌面程序后才会采用新设置。',
 +        });
 +      } else {
 +        setNotice({
@@ -1483,7 +1513,10 @@ index 0000000..3861919
 +          text: errorText(result.errors ?? [], result.message || '保存失败。'),
 +        });
 +      }
-+      await load();
++      // Only re-read after a failure. After a success the form already shows
++      // exactly what was written, and re-reading would silently discard any
++      // edit the user started while the request was in flight.
++      if (!result.ok) await load();
 +    } catch (error) {
 +      const conflict = error instanceof ManagementError
 +        && (error as ManagementError).status === 409;
@@ -1734,10 +1767,10 @@ index 6cdadb9..73aca93 100644
  });
 diff --git a/src/renderer/src/context/desktop-settings-context.tsx b/src/renderer/src/context/desktop-settings-context.tsx
 new file mode 100644
-index 0000000..baa33a6
+index 0000000..b587b68
 --- /dev/null
 +++ b/src/renderer/src/context/desktop-settings-context.tsx
-@@ -0,0 +1,89 @@
+@@ -0,0 +1,92 @@
 +/* eslint-disable react/jsx-no-constructed-context-values */
 +/**
 + * Desktop presentation settings: subtitle size and the character window.
@@ -1769,6 +1802,9 @@ index 0000000..baa33a6
 +  character_height: 620,
 +  character_scale: 1,
 +  read_error: '',
++  // The character window only renders with these values; it never saves, so it
++  // has no revision to carry.
++  revision: '',
 +};
 +
 +interface DesktopSettingsContextValue {
@@ -2314,10 +2350,10 @@ index d48f21e..d6686ae 100644
    };
  
 diff --git a/src/renderer/src/services/aemeath-management.ts b/src/renderer/src/services/aemeath-management.ts
-index 3ceb6e8..7e16e62 100644
+index 3ceb6e8..56bd5a2 100644
 --- a/src/renderer/src/services/aemeath-management.ts
 +++ b/src/renderer/src/services/aemeath-management.ts
-@@ -534,3 +534,71 @@ export async function saveLive2D(input: {
+@@ -534,3 +534,89 @@ export async function saveLive2D(input: {
      }),
    });
  }
@@ -2348,6 +2384,15 @@ index 3ceb6e8..7e16e62 100644
 +  character_scale: number;
 +  /** Why the settings could not be read, when they could not. */
 +  read_error: string;
++  /**
++   * Revision this read is based on.
++   *
++   * It travels with the read on purpose. Taking it from a different endpoint
++   * meant a failure there silently produced an empty revision, and the backend
++   * skips its conflict check for an empty revision — so a stale save could
++   * overwrite a newer change while appearing to succeed.
++   */
++  revision: string;
 +}
 +
 +/** Outcome of saving desktop settings. */
@@ -2363,7 +2408,15 @@ index 3ceb6e8..7e16e62 100644
 +
 +/** Read the desktop and subtitle settings. */
 +export async function fetchDesktopSettings(): Promise<DesktopSettings> {
-+  return request<DesktopSettings>('/desktop/settings');
++  const data = await request<DesktopSettings>('/desktop/settings');
++  // Normalise a missing or null revision to an empty string.
++  //
++  // The backend always sends one; an older backend (or a proxy that drops the
++  // field) would otherwise hand `null` to the form, and the save request would
++  // be rejected with a 422 for a non-string `expected_revision`. An empty
++  // revision is meaningful: the backend reads it as "no conflict check", which
++  // is the intended behaviour when the caller genuinely has no revision.
++  return { ...data, revision: data.revision ?? '' };
 +}
 +
 +/** Save the desktop and subtitle settings. */
@@ -2385,7 +2438,8 @@ index 3ceb6e8..7e16e62 100644
 +      character_width: input.characterWidth,
 +      character_height: input.characterHeight,
 +      character_scale: input.characterScale,
-+      expected_revision: input.expectedRevision,
++      // Never send null: the request model requires a string.
++      expected_revision: input.expectedRevision ?? '',
 +    }),
 +  });
 +}

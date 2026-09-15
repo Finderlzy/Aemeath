@@ -116,6 +116,70 @@ async def test_overview_reports_unparseable_config_separately(desktop_env):
     assert overview["read_error"] != ""
 
 
+async def test_overview_carries_the_revision_it_describes(desktop_env):
+    """The read returns the revision that belongs to its own values.
+
+    The page saves with this revision; when it came from a different endpoint, a
+    transient failure there produced an empty revision, and the backend skips
+    its conflict check for an empty revision. A save could then overwrite a
+    newer change while appearing to succeed.
+    """
+    from aemeath.management.desktop import DesktopSettingsService
+
+    service = DesktopSettingsService(desktop_env.path)
+    overview = service.overview()
+
+    assert overview["revision"] == service.revision()
+    assert overview["revision"] != ""
+
+
+async def test_the_revisions_from_read_and_save_agree(desktop_env):
+    """A save started from a fresh read is never rejected as a conflict.
+
+    This is the round trip the page performs: read, edit, save.
+    """
+    from aemeath.management.desktop import DesktopSettingsService
+
+    service = DesktopSettingsService(desktop_env.path)
+    read = service.overview()
+
+    result = await service.save(
+        values=_valid_values(subtitle_font_size=28),
+        expected_revision=read["revision"],
+    )
+    assert result["ok"] is True, result
+
+    # And the revision the save reports is the one a follow-up read returns,
+    # so a second save from the refreshed form also succeeds.
+    after = DesktopSettingsService(desktop_env.path).overview()
+    assert after["revision"] == result["saved_revision"]
+
+    second = await DesktopSettingsService(desktop_env.path).save(
+        values=_valid_values(subtitle_font_size=29),
+        expected_revision=after["revision"],
+    )
+    assert second["ok"] is True, second
+
+
+async def test_a_stale_revision_from_another_read_is_refused(desktop_env):
+    """Conflicts are still detected — the fix did not disable the guard."""
+    from aemeath.management.desktop import DesktopSettingsService
+
+    service = DesktopSettingsService(desktop_env.path)
+    stale = service.overview()["revision"]
+
+    # Someone else saves in between.
+    assert (
+        await service.save(values=_valid_values(character_width=500), expected_revision=stale)
+    )["ok"] is True
+
+    result = await service.save(
+        values=_valid_values(character_width=460), expected_revision=stale
+    )
+    assert result["ok"] is False
+    assert result["conflict"] is True
+
+
 async def test_saved_values_survive_a_restart(desktop_env):
     """The character window reads what the management window saved.
 

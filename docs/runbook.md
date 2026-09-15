@@ -149,6 +149,44 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build-desktop.ps1
 > 这些项目在 [验收记录](acceptance.md#十九v2-t03-桌面角色托盘与字幕集成2026-09-15)
 > 中明确记为待人工确认。
 
+设置相关的行为另有两个探针，是为"保存了但没生效"这类缺陷补的：
+
+```powershell
+# 管理页 → 后端的保存往返（真实 Chrome）
+.\vendor\Open-LLM-VTuber\.venv\Scripts\python.exe scripts\probe_desktop_settings_ui.py
+
+# 管理页保存 → 运行中的角色窗口立即改变尺寸（真实桌面程序）
+.\vendor\Open-LLM-VTuber\.venv\Scripts\python.exe scripts\probe_desktop_live_reload.py
+```
+
+> `probe_desktop_live_reload.py` 经应用自身 IPC 打开管理窗口并在页面里点保存。
+> **不能用 HTTP 直接改配置来代替**——通知由页面经 preload 桥发出，
+> 绕过页面永远触发不到那条路径，会得出"失败"的错误结论。
+
+## 管理页面的来源（改前端时必读）
+
+桌面上有两个窗口，它们加载**不同的构建产物**：
+
+| 窗口 | 内容来源 | 由谁构建 |
+| --- | --- | --- |
+| 角色窗口 | `out/renderer/` | `electron-vite build`（`npm run build`） |
+| 管理窗口 | 后端 HTTP 提供的 `vendor/Open-LLM-VTuber/frontend/` | `vite build --mode web`（`npm run build:web`），再由构建脚本部署 |
+
+**只跑 `npm run build` 是不够的。** 改了管理页代码却只做 Electron 构建，管理窗口会继续
+加载后端的旧页面，表现为"代码改了但界面没变"——2026-09-15 的「保存设置不生效」正是
+这个原因。`scripts/build-desktop.ps1` 已把两步串起来，并在部署后断言 `index.html`
+引用了刚构建的 asset；手工构建时请同时执行 `build` 与 `build:web` 并部署。
+
+## 重新生成 web 补丁
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\regen-web-patch.ps1 -Patch 0003
+```
+
+脚本会在干净检出上按序套用前置补丁建立基线、叠加工作副本的改动生成补丁，
+**再套用整串到另一个干净检出并逐字节比对**。不要手工生成：`0001` 会改 `App.tsx`，
+在未套用前置补丁的树上生成会让补丁永远 `patch does not apply`。
+
 ## 配置
 
 - 权威配置：`config/conf.aemeath.yaml`（**受版本管理**；只允许 `${VAR}` 引用，

@@ -418,6 +418,9 @@ class DesktopSettingsResponse(BaseModel):
     Both windows read the same values: the character window lays out its
     subtitle with them, and the management window edits them. They therefore
     live in the authoritative config rather than in either window's local state.
+
+    ``revision`` belongs to this response so a save is based on the exact read
+    it came from; see ``DesktopSettingsService.overview``.
     """
 
     subtitle_font_size: int = 22
@@ -427,6 +430,7 @@ class DesktopSettingsResponse(BaseModel):
     character_height: int = 620
     character_scale: float = 1.0
     read_error: str = ""
+    revision: str = ""
 
 
 class DesktopSettingsRequest(BaseModel):

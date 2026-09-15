@@ -128,6 +128,13 @@ class DesktopSettingsService:
         never opened this page must still get usable values. ``read_error`` is
         reserved for a config that exists but cannot be parsed, which is the
         case the UI has to distinguish from "not configured yet".
+
+        The response carries its own ``revision``. The page must save with the
+        revision that belongs to *this* read: taking it from a different
+        endpoint (as an earlier version did) meant a transient failure there
+        silently produced an empty revision, and an empty revision makes the
+        backend skip the conflict check entirely — so a save could overwrite a
+        newer change while appearing to succeed.
         """
         read_error = ""
         if self.config_path.is_file():
@@ -139,7 +146,10 @@ class DesktopSettingsService:
                     read_error = f"配置文件无法解析：{exc}"
 
         section = self._section()
-        result: Dict[str, Any] = {"read_error": read_error}
+        result: Dict[str, Any] = {
+            "read_error": read_error,
+            "revision": self.revision(),
+        }
         for field, fallback in DEFAULTS.items():
             raw = section.get(field)
             if raw is None:

@@ -97,7 +97,7 @@ class AemeathBridge:
     """Routes every desktop event into Aemeath and every output back out."""
 
     def __init__(self, *, coordinator, situation, memory=None, screen=None,
-                 metrics=None, config=None, tts_engine=None) -> None:
+                 metrics=None, config=None, tts_engine=None, learning=None) -> None:
         """Wire the bridge to the Aemeath modules it fronts.
 
         Args:
@@ -110,6 +110,7 @@ class AemeathBridge:
             tts_engine: Upstream TTS engine used to voice proactive messages.
                 Attached later by ``ServiceContext``, because the bridge is
                 built before the engine is resolved.
+            learning: Expression / jargon learning service, when configured.
         """
         self._coordinator = coordinator
         self._situation = situation
@@ -118,6 +119,7 @@ class AemeathBridge:
         self._metrics = metrics
         self._config = config
         self._tts_engine = tts_engine
+        self._learning = learning
 
         self._session: Optional[ClientSession] = None
         self._generation = 0
@@ -1117,9 +1119,12 @@ class AemeathBridge:
         )
 
     def queue_extraction(self, *, turn_id: str) -> None:
-        """Queue memory extraction for a finished turn.
+        """Queue memory extraction and learning for a finished turn.
 
         A proactive turn is not a user statement, so it is never queued as one.
+        Both queues are driven from the same messages so the two always see the
+        same conversation; whether learning actually runs is the learning
+        service's own decision (it is off by default).
         """
         if self._memory is None:
             return
@@ -1128,6 +1133,22 @@ class AemeathBridge:
         if not user_messages:
             return
         self._memory.store.enqueue_extraction(user_messages)
+
+        learning = self.learning
+        if learning is not None:
+            # Queued with *both* sides of the turn: the model needs Aemeath's
+            # reply to judge what a word meant, while only the user's message
+            # can serve as evidence for a new item.
+            try:
+                learning.queue_turn([m.message_id for m in messages])
+            except Exception as exc:  # pragma: no cover - defensive
+                # Learning must never be able to break a turn.
+                logger.error("Could not queue learning for turn {}: {}", turn_id, exc)
+
+    @property
+    def learning(self):
+        """The learning service, when one is wired in."""
+        return self._learning
 
     def finish_turn(
         self,

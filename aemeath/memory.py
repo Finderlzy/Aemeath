@@ -904,6 +904,12 @@ class MemoryStore:
                 "(SELECT task_id FROM pending_extraction_messages)"
             )
 
+        # This path deletes the source messages outright, so the learning that
+        # cited them has to go too — otherwise a learned phrase would outlive
+        # the conversation it came from, which is exactly the derived content
+        # the forgetting boundary covers.
+        self._purge_learning_for_messages(evidence)
+
         logger.info("Deleted memory {} and its derived data.", memory_id)
 
     def purge_by_source_message(self, message_id: str) -> int:
@@ -1079,6 +1085,12 @@ class MemoryStore:
                 "(SELECT task_id FROM pending_extraction_messages)"
             )
 
+        # Learning derived from the same span goes with it. The two stores share
+        # this database precisely so that "forget this" reaches everything it
+        # produced, rather than leaving a learned phrase behind that still
+        # paraphrases what the user removed.
+        self._purge_learning_for_messages([mid for mid, _ in resolved])
+
         logger.info(
             "Forgot memory {} ({} fragment(s), {} derived invalidated).",
             memory_id,
@@ -1135,7 +1147,47 @@ class MemoryStore:
                 "DELETE FROM pending_extraction WHERE id NOT IN "
                 "(SELECT task_id FROM pending_extraction_messages)"
             )
+
+        # Learning that cited this message follows the same boundary: an entry
+        # whose only evidence was this message has nothing left to be checked
+        # against and goes with it.
+        self._purge_learning_for_messages([message_id])
         return count
+
+    def _purge_learning_for_messages(
+        self, message_ids: Sequence[str]
+    ) -> Dict[str, int]:
+        """Clean up learning derived from messages being forgotten.
+
+        Imported lazily and tolerated when absent: the learning tables are
+        created by :class:`~aemeath.learning.LearningStore`, and a database that
+        predates V2-T04 has neither the tables nor anything to clean up. A
+        failure here must not break forgetting itself, which is the operation
+        the user actually asked for.
+
+        Args:
+            message_ids: Messages whose derived learning should go.
+
+        Returns:
+            Counts reported by the learning store; empty when it is not present.
+        """
+        if not message_ids:
+            return {}
+        try:
+            from .learning import LearningStore
+
+            store = LearningStore(self._db_path)
+            totals = {"removed": 0, "retained": 0, "evidence_removed": 0}
+            for message_id in dict.fromkeys(message_ids):
+                result = store.purge_by_source_message(message_id)
+                for key in totals:
+                    totals[key] += int(result.get(key, 0))
+            return totals
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "Could not clean up learning for forgotten messages: {}", exc
+            )
+            return {}
 
     def _message_content(self, conn: sqlite3.Connection, message_id: str) -> str:
         """Read a message body inside an existing transaction."""

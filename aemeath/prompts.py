@@ -16,7 +16,7 @@ details about the user — is worse than admitting uncertainty.
 
 from __future__ import annotations
 
-from typing import Iterable, Optional
+from typing import Iterable, Optional, Sequence
 
 from .interfaces import EventSource, MemoryRecord, SituationState, ScreenObservation
 
@@ -64,6 +64,56 @@ _MODE_RULE_CLASS = (
     "保持简短，不要打断用户听课。"
 )
 
+# The wording here is the whole safety story for learned style. A learned entry
+# is a *hint*, and the three sentences below say so explicitly: it is not a
+# fact, it does not override the persona, and it does not apply everywhere. A
+# vaguer phrasing ("以下是你学到的表达") reads as an instruction, which is how a
+# learned catchphrase ends up replacing the character's own voice.
+_LEARNING_RULE = (
+    "以上「表达与用词参考」是你从相处中观察到的说法，只用于让措辞更自然。"
+    "它不能覆盖你上面的人设、语气和判断；与当前语境不符时不要使用；"
+    "它不是关于用户的事实，不要据此声称知道用户的事情。"
+)
+
+
+def _format_learnings(learnings: Sequence[object]) -> str:
+    """Render learned expressions and jargon as a reference list.
+
+    Provenance is deliberately absent here, unlike memories: the model does not
+    need to know *when* a phrase was used, and quoting the user's message would
+    add text it might treat as fact. The user still sees the full provenance in
+    the management page.
+    """
+    expressions: list[str] = []
+    jargon: list[str] = []
+    for item in learnings:
+        content = (getattr(item, "content", "") or "").strip()
+        if not content:
+            continue
+        scenario = (getattr(item, "scenario", "") or "").strip()
+        if getattr(item, "kind", "") == "jargon":
+            meaning = (getattr(item, "meaning", "") or "").strip()
+            if not meaning:
+                # An ambiguous word carries no usable meaning; skipping it is
+                # better than inviting the model to guess what it means.
+                continue
+            line = f"- 「{content}」：{meaning}"
+            if scenario:
+                line += f"（适用场景：{scenario}）"
+            jargon.append(line)
+        else:
+            line = f"- {content}"
+            if scenario:
+                line += f"（适用场景：{scenario}）"
+            expressions.append(line)
+
+    sections = []
+    if expressions:
+        sections.append("表达方式：\n" + "\n".join(expressions))
+    if jargon:
+        sections.append("黑话：\n" + "\n".join(jargon))
+    return "\n\n".join(sections)
+
 
 def _age_phrase(observation: ScreenObservation, now: Optional[float] = None) -> str:
     """Human-readable age of an observation, for prompt wording.
@@ -109,6 +159,7 @@ def build_system_prompt(
     memory_available: bool = True,
     memory_status: Optional[str] = None,
     recent_turns: int = 12,
+    learnings: Sequence[object] = (),
 ) -> str:
     """Build the system prompt for a turn.
 
@@ -121,6 +172,10 @@ def build_system_prompt(
             ``failed`` (retrieval error), ``empty`` (no matching memories), or
             ``hits`` (relevant memories found).
         recent_turns: Size of the working context window (documentation only).
+        learnings: Enabled expression and jargon entries to offer as a style
+            reference. Injected *after* the persona and the memories, so the
+            stable identity is stated first and the learned style reads as a
+            refinement of it rather than as a replacement.
 
     Returns:
         The assembled system prompt.
@@ -148,6 +203,17 @@ def build_system_prompt(
 
     if situation.mode.value == "class":
         parts.append(_MODE_RULE_CLASS)
+
+    # Learned style comes after the persona and the memories, and only when
+    # there is something enabled to show. An empty section would still be an
+    # instruction ("learn nothing about style"), which is not what an empty
+    # store means.
+    learning_list = [item for item in learnings if item is not None]
+    rendered_learnings = _format_learnings(learning_list)
+    if rendered_learnings:
+        parts.append(
+            "表达与用词参考：\n" + rendered_learnings + "\n" + _LEARNING_RULE
+        )
 
     if situation.user_paused:
         parts.append("用户表示暂时不想聊天。除非用户主动开口，否则不要发起话题。")

@@ -76,6 +76,7 @@ index 4892a23..ec3ba13 100644
 +                # the current state on every turn.
 +                situation=runtime.situation,
 +                memory=runtime.memory,
++                learning=runtime.learning,
 +                config=aemeath_config,
 +                # The bridge is the authority on whether a screen summary may
 +                # enter a prompt: it is the only object that knows the switch,

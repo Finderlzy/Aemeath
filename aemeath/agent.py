@@ -89,6 +89,7 @@ class AemeathAgent(AgentInterface):
         *,
         situation=None,
         memory=None,
+        learning=None,
         config=None,
         screen_summary_provider: Optional[Callable[[], Any]] = None,
     ) -> None:
@@ -124,6 +125,10 @@ class AemeathAgent(AgentInterface):
         # a switch, because every update replaces the object.
         self._situation_manager = situation
         self._memory = memory
+        #: Expression and jargon learning. Held as the service (not a snapshot
+        #: of its items) because the user can disable or revoke an entry while
+        #: the model is generating: the selection has to be re-read per turn.
+        self._learning = learning
         self._config = config
         #: Optional screen-summary provider. Held as a callable rather than as
         #: the observation itself, because validity (switch, age, source
@@ -180,6 +185,30 @@ class AemeathAgent(AgentInterface):
                 context for this agent.
         """
         self._screen_summary_provider = provider
+
+    def set_learning_service(self, learning) -> None:
+        """Install or replace the learning service.
+
+        Set after construction when the runtime is built later than the agent
+        (the factory's path); ``None`` simply means no learned style is injected.
+        """
+        self._learning = learning
+
+    def _prompt_learnings(self) -> List[Any]:
+        """The learned entries this turn may use.
+
+        Re-read on every turn rather than cached, for the same reason the screen
+        summary is: disabling an entry has to take effect on the next reply, and
+        a cache populated at construction would keep injecting it. A failure here
+        is reported as "no learned style", never as a broken turn.
+        """
+        if self._learning is None:
+            return []
+        try:
+            return self._learning.prompt_items()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.error("Learning lookup failed; continuing without it: {}", exc)
+            return []
 
     def _usable_screen_summary(self):
         """The screen observation this turn may cite, if any.
@@ -388,6 +417,7 @@ class AemeathAgent(AgentInterface):
             memory_available=memory_available,
             memory_status=memory_status,
             recent_turns=self._recent_turn_limit(),
+            learnings=self._prompt_learnings(),
         )
 
         messages: List[Dict[str, Any]] = list(self._memory_messages)

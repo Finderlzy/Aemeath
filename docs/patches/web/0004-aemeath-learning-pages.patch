@@ -1,0 +1,780 @@
+diff --git a/src/renderer/src/components/aemeath/expression-page.tsx b/src/renderer/src/components/aemeath/expression-page.tsx
+new file mode 100644
+index 0000000..2048502
+--- /dev/null
++++ b/src/renderer/src/components/aemeath/expression-page.tsx
+@@ -0,0 +1,20 @@
++/**
++ * 表达学习 page (v2 task V2-T04).
++ *
++ * Shows how the user phrases things, learned from conversation. The heavy
++ * lifting is in `learning-page.tsx`, shared with the jargon page: both are the
++ * same store filtered by `kind`, and duplicating the candidate/revoke logic
++ * would let the two pages drift apart.
++ */
++import LearningPage from './learning-page';
++
++export default function ExpressionPage(): JSX.Element {
++  return (
++    <LearningPage
++      kind="expression"
++      title="表达学习"
++      description="爱弥斯从你们的对话里学到的说法、口头语和语气习惯。"
++      contentLabel="表达方式"
++    />
++  );
++}
+diff --git a/src/renderer/src/components/aemeath/jargon-page.tsx b/src/renderer/src/components/aemeath/jargon-page.tsx
+new file mode 100644
+index 0000000..817d3e6
+--- /dev/null
++++ b/src/renderer/src/components/aemeath/jargon-page.tsx
+@@ -0,0 +1,20 @@
++/**
++ * 黑话词典 page (v2 task V2-T04).
++ *
++ * Shows words that mean something specific between the user and Aemeath.
++ * A word may carry several meanings at once: the design forbids resolving
++ * ambiguity by overwriting an earlier sense, so each meaning is listed, and a
++ * word whose meaning could not be settled is flagged for the user to fill in.
++ */
++import LearningPage from './learning-page';
++
++export default function JargonPage(): JSX.Element {
++  return (
++    <LearningPage
++      kind="jargon"
++      title="黑话词典"
++      description="爱弥斯学到的、在你这里具有特殊含义的词与说法。"
++      contentLabel="词语"
++    />
++  );
++}
+diff --git a/src/renderer/src/components/aemeath/learning-page.tsx b/src/renderer/src/components/aemeath/learning-page.tsx
+new file mode 100644
+index 0000000..68c29ef
+--- /dev/null
++++ b/src/renderer/src/components/aemeath/learning-page.tsx
+@@ -0,0 +1,509 @@
++/* eslint-disable @typescript-eslint/no-explicit-any */
++/**
++ * Expression and jargon learning pages (v2 task V2-T04).
++ *
++ * Both pages are one store viewed two ways, so they share this component and
++ * differ only in the `kind` they filter on. Splitting them would duplicate the
++ * candidate/revoke/forget logic, which is exactly where the two would drift.
++ *
++ * Four rules from the acceptance criteria shape the screen:
++ *
++ * 1. **"Nothing learned yet" and "learning is not running" are different.**
++ *    The backend reports `available` and `enabled` separately from the item
++ *    list. Learning is off by default, so a page that showed a bare empty list
++ *    would leave the user waiting for results that can never arrive.
++ * 2. **A candidate is labelled as a candidate.** Entries the checks would not
++ *    confirm are shown with the reason, and are visibly *not* in use. Showing
++ *    a rejected item as learned would misrepresent what the character knows.
++ * 3. **Where it came from is always visible.** Every entry lists its source
++ *    messages and the located span, so "why does she say that" is answerable.
++ * 4. **Revoking is terminal and says so.** The page does not offer "restore"
++ *    for a revoked entry, because the backend refuses it; offering a button
++ *    that cannot work would be worse than not offering one.
++ *
++ * Nothing here rewrites the persona: these pages manage style notes only.
++ */
++import { useCallback, useEffect, useState } from 'react';
++import { Box, Button, Flex, Heading, Input, Text, Textarea } from '@chakra-ui/react';
++
++import {
++  editLearning,
++  fetchLearning,
++  ManagementError,
++  resolveLearningMeanings,
++  revokeLearning,
++  toggleLearning,
++  type LearningItemView,
++  type LearningOverviewResponse,
++} from '../../services/aemeath-management';
++
++interface Notice {
++  kind: 'ok' | 'error' | 'info';
++  text: string;
++}
++
++const NOTICE_COLOR: Record<Notice['kind'], string> = {
++  ok: 'green.300',
++  error: 'red.300',
++  info: 'blue.200',
++};
++
++/** Human labels for the four states, so the page never shows a raw enum. */
++const STATUS_LABEL: Record<string, string> = {
++  candidate: '候选（未启用）',
++  enabled: '已启用',
++  disabled: '已禁用',
++  revoked: '已撤销',
++};
++
++const STATUS_COLOR: Record<string, string> = {
++  candidate: 'orange.300',
++  enabled: 'green.300',
++  disabled: 'whiteAlpha.600',
++  revoked: 'red.300',
++};
++
++interface Props {
++  /** `expression` or `jargon`; selects the page's slice of the store. */
++  kind: string;
++  title: string;
++  description: string;
++  /** Wording for the primary field, which differs between the two pages. */
++  contentLabel: string;
++}
++
++export default function LearningPage({
++  kind,
++  title,
++  description,
++  contentLabel,
++}: Props): JSX.Element {
++  const [listing, setListing] = useState<LearningOverviewResponse | null>(null);
++  const [loadError, setLoadError] = useState('');
++  const [notice, setNotice] = useState<Notice | null>(null);
++  const [busy, setBusy] = useState(false);
++  const [statusFilter, setStatusFilter] = useState('');
++  const [query, setQuery] = useState('');
++
++  const [editingId, setEditingId] = useState('');
++  const [editContent, setEditContent] = useState('');
++  const [editMeaning, setEditMeaning] = useState('');
++  const [editScenario, setEditScenario] = useState('');
++
++  const [clarifyingId, setClarifyingId] = useState('');
++  const [clarifyText, setClarifyText] = useState('');
++
++  /**
++   * Load the list.
++   *
++   * A load failure is held separately from the payload so the two states render
++   * differently: an empty list from a working read is a result, an error is not.
++   */
++  const load = useCallback(async () => {
++    try {
++      const data = await fetchLearning({
++        kind,
++        status: statusFilter,
++        query,
++      });
++      setListing(data);
++      setLoadError('');
++    } catch (error) {
++      setListing(null);
++      setLoadError(error instanceof Error ? error.message : String(error));
++    }
++  }, [kind, statusFilter, query]);
++
++  useEffect(() => {
++    void load();
++  }, [load]);
++
++  const run = async (action: () => Promise<any>, successText: string, after?: () => void) => {
++    setBusy(true);
++    setNotice(null);
++    try {
++      const result = await action();
++      if (result?.ok) {
++        setNotice({ kind: 'ok', text: successText });
++        after?.();
++      } else {
++        setNotice({ kind: 'error', text: result?.error || '操作失败。' });
++      }
++      await load();
++    } catch (error) {
++      const payload = error instanceof ManagementError ? error.payload : null;
++      setNotice({
++        kind: 'error',
++        text: (payload as any)?.error || (error instanceof Error ? error.message : String(error)),
++      });
++    } finally {
++      setBusy(false);
++    }
++  };
++
++  const startEdit = (item: LearningItemView) => {
++    setEditingId(item.item_id);
++    setEditContent(item.content);
++    setEditMeaning(item.meaning);
++    setEditScenario(item.scenario);
++  };
++
++  const doEdit = async (item: LearningItemView) => {
++    if (!editContent.trim()) {
++      setNotice({ kind: 'error', text: '内容不能为空。' });
++      return;
++    }
++    await run(
++      () =>
++        editLearning({
++          itemId: item.item_id,
++          content: editContent,
++          meaning: editMeaning,
++          scenario: editScenario,
++          // The revision guards against two edits racing: the backend answers a
++          // stale one with a conflict instead of silently replacing newer text.
++          expectedRevision: item.revision,
++        }),
++      '已保存修改。人工修改优先于后续自动学习结果。',
++      () => setEditingId(''),
++    );
++  };
++
++  const doToggle = async (item: LearningItemView, enabled: boolean) => {
++    await run(
++      () => toggleLearning(item.item_id, enabled),
++      enabled ? '已启用，会在合适语境中使用。' : '已禁用，不再用于回复。',
++    );
++  };
++
++  const doRevoke = async (item: LearningItemView) => {
++    await run(
++      () => revokeLearning(item.item_id),
++      '已撤销这次学习：不再使用，也不会从同一段对话里重新学回。',
++    );
++  };
++
++  const doClarify = async (item: LearningItemView) => {
++    if (!clarifyText.trim()) {
++      setNotice({ kind: 'error', text: '请填写这条黑话的含义。' });
++      return;
++    }
++    await run(
++      () =>
++        resolveLearningMeanings(item.item_id, [
++          { meaning: clarifyText.trim(), scenario: item.scenario },
++        ]),
++      '已记录含义，之后会按这个含义使用。',
++      () => {
++        setClarifyingId('');
++        setClarifyText('');
++      },
++    );
++  };
++
++  const notRunning = listing !== null && !listing.available;
++  const items = listing?.items ?? [];
++
++  return (
++    <Box maxWidth="900px">
++      <Heading size="md" marginBottom="2">
++        {title}
++      </Heading>
++      <Text fontSize="sm" color="whiteAlpha.800" marginBottom="2">
++        {description}
++      </Text>
++      <Text fontSize="xs" color="whiteAlpha.700" marginBottom="4">
++        学习只使用你与爱弥斯的对话，结果保存在本机数据库中，可随时修改、禁用或撤销。
++        自动学习不会改写核心人设。
++      </Text>
++
++      {notice && (
++        <Box
++          background="blackAlpha.400"
++          borderWidth="1px"
++          borderColor={NOTICE_COLOR[notice.kind]}
++          padding="3"
++          marginBottom="4"
++          borderRadius="md"
++        >
++          <Text fontSize="sm">{notice.text}</Text>
++        </Box>
++      )}
++
++      {loadError && (
++        <Box
++          background="red.900"
++          borderWidth="1px"
++          borderColor="red.400"
++          padding="3"
++          marginBottom="4"
++          borderRadius="md"
++        >
++          <Text fontWeight="bold">无法读取学习条目</Text>
++          <Text fontSize="sm">{loadError}</Text>
++          <Button size="sm" marginTop="2" onClick={() => void load()}>
++            重试
++          </Button>
++        </Box>
++      )}
++
++      {notRunning && listing && (
++        <Box
++          background="orange.900"
++          borderWidth="1px"
++          borderColor="orange.300"
++          padding="3"
++          marginBottom="4"
++          borderRadius="md"
++        >
++          <Text fontWeight="bold">学习没有在运行，这不是「还没有学到东西」</Text>
++          <Text fontSize="sm">{listing.error}</Text>
++          <Text fontSize="xs" marginTop="1" color="whiteAlpha.800">
++            下面列出的条目来自本地数据库，仍然可以查看、修改或撤销；
++            但爱弥斯不会在对话中继续学习新内容。
++          </Text>
++        </Box>
++      )}
++
++      <Flex marginBottom="3" gap="2" wrap="wrap">
++        <Input
++          value={query}
++          onChange={(e) => setQuery(e.target.value)}
++          placeholder="搜索内容或含义"
++          maxWidth="260px"
++          onKeyDown={(e) => {
++            if (e.key === 'Enter') void load();
++          }}
++        />
++        <Button
++          size="sm"
++          variant={statusFilter === '' ? 'solid' : 'ghost'}
++          onClick={() => setStatusFilter('')}
++        >
++          全部
++        </Button>
++        {['enabled', 'candidate', 'disabled', 'revoked'].map((value) => (
++          <Button
++            key={value}
++            size="sm"
++            variant={statusFilter === value ? 'solid' : 'ghost'}
++            onClick={() => setStatusFilter(value)}
++          >
++            {STATUS_LABEL[value]}
++          </Button>
++        ))}
++      </Flex>
++
++      {listing && listing.ok && items.length === 0 && (
++        <Text fontSize="sm" color="whiteAlpha.700" marginBottom="4">
++          {query.trim() || statusFilter
++            ? '没有符合条件的条目。'
++            : '还没有学到任何内容。与她多聊几句，学到的东西会出现在这里。'}
++        </Text>
++      )}
++
++      {items.map((item) => (
++        <Box
++          key={item.item_id}
++          borderWidth="1px"
++          borderColor="whiteAlpha.300"
++          borderRadius="md"
++          padding="3"
++          marginBottom="3"
++        >
++          {editingId === item.item_id ? (
++            <Box>
++              <Text fontSize="xs" color="whiteAlpha.700" marginBottom="1">
++                {contentLabel}
++              </Text>
++              <Input
++                value={editContent}
++                onChange={(e) => setEditContent(e.target.value)}
++                marginBottom="2"
++              />
++              {kind === 'jargon' && (
++                <>
++                  <Text fontSize="xs" color="whiteAlpha.700" marginBottom="1">
++                    含义
++                  </Text>
++                  <Input
++                    value={editMeaning}
++                    onChange={(e) => setEditMeaning(e.target.value)}
++                    marginBottom="2"
++                  />
++                </>
++              )}
++              <Text fontSize="xs" color="whiteAlpha.700" marginBottom="1">
++                适用场景
++              </Text>
++              <Textarea
++                value={editScenario}
++                onChange={(e) => setEditScenario(e.target.value)}
++                rows={2}
++                marginBottom="2"
++              />
++              <Button
++                size="sm"
++                colorPalette="blue"
++                marginRight="2"
++                disabled={busy}
++                onClick={() => void doEdit(item)}
++              >
++                保存修改
++              </Button>
++              <Button size="sm" variant="ghost" onClick={() => setEditingId('')}>
++                取消
++              </Button>
++            </Box>
++          ) : (
++            <Box>
++              <Flex align="center" gap="2" wrap="wrap">
++                <Text fontSize="sm" fontWeight="bold">
++                  {item.content}
++                </Text>
++                <Text fontSize="xs" color={STATUS_COLOR[item.status] ?? 'whiteAlpha.600'}>
++                  {STATUS_LABEL[item.status] ?? item.status}
++                </Text>
++                {item.manual_override && (
++                  <Text fontSize="xs" color="blue.200">
++                    已人工修改
++                  </Text>
++                )}
++                {item.origin === 'manual' && (
++                  <Text fontSize="xs" color="blue.200">
++                    手动添加
++                  </Text>
++                )}
++              </Flex>
++
++              {kind === 'jargon' && item.meanings.length > 0 && (
++                <Box marginTop="1">
++                  {item.meanings.map((meaning) => (
++                    <Text key={meaning.kind_id} fontSize="xs" color="whiteAlpha.800">
++                      含义：{meaning.meaning}
++                      {meaning.scenario ? `（适用场景：${meaning.scenario}）` : ''}
++                      {meaning.needs_clarification ? '　⚠ 含义待确认' : ''}
++                    </Text>
++                  ))}
++                </Box>
++              )}
++
++              {kind !== 'jargon' && item.scenario && (
++                <Text fontSize="xs" color="whiteAlpha.800" marginTop="1">
++                  适用场景：{item.scenario}
++                </Text>
++              )}
++
++              {item.check_detail && (
++                <Text fontSize="xs" color="orange.300" marginTop="1">
++                  未启用原因：{item.check_detail}
++                </Text>
++              )}
++
++              {item.sources.length > 0 && (
++                <Box marginTop="2">
++                  <Text fontSize="xs" color="whiteAlpha.700">
++                    来源消息：
++                  </Text>
++                  {item.sources.map((source) => (
++                    <Text
++                      key={source.message_id}
++                      fontSize="xs"
++                      color="whiteAlpha.700"
++                      whiteSpace="pre-wrap"
++                    >
++                      · {source.content || '（来源消息已被遗忘）'}
++                    </Text>
++                  ))}
++                </Box>
++              )}
++
++              {clarifyingId === item.item_id ? (
++                <Box marginTop="2">
++                  <Input
++                    value={clarifyText}
++                    onChange={(e) => setClarifyText(e.target.value)}
++                    placeholder="这条黑话在你这里是什么意思？"
++                    marginBottom="2"
++                  />
++                  <Button
++                    size="sm"
++                    colorPalette="blue"
++                    marginRight="2"
++                    disabled={busy}
++                    onClick={() => void doClarify(item)}
++                  >
++                    保存含义
++                  </Button>
++                  <Button size="sm" variant="ghost" onClick={() => setClarifyingId('')}>
++                    取消
++                  </Button>
++                </Box>
++              ) : (
++                <Flex marginTop="2" gap="2" wrap="wrap">
++                  <Button
++                    size="sm"
++                    variant="ghost"
++                    disabled={busy}
++                    onClick={() => startEdit(item)}
++                  >
++                    编辑
++                  </Button>
++                  {item.ambiguous && (
++                    <Button
++                      size="sm"
++                      colorPalette="orange"
++                      disabled={busy}
++                      onClick={() => {
++                        setClarifyingId(item.item_id);
++                        setClarifyText('');
++                      }}
++                    >
++                      填写含义
++                    </Button>
++                  )}
++                  {item.status === 'enabled' && (
++                    <Button
++                      size="sm"
++                      variant="ghost"
++                      disabled={busy}
++                      onClick={() => void doToggle(item, false)}
++                    >
++                      禁用
++                    </Button>
++                  )}
++                  {item.status === 'disabled' && (
++                    <Button
++                      size="sm"
++                      variant="ghost"
++                      disabled={busy}
++                      onClick={() => void doToggle(item, true)}
++                    >
++                      恢复使用
++                    </Button>
++                  )}
++                  {item.status !== 'revoked' && (
++                    <Button
++                      size="sm"
++                      variant="ghost"
++                      color="red.300"
++                      disabled={busy}
++                      onClick={() => void doRevoke(item)}
++                    >
++                      撤销这次学习
++                    </Button>
++                  )}
++                  {item.status === 'revoked' && (
++                    <Text fontSize="xs" color="whiteAlpha.600">
++                      已撤销：不再使用，也不能从同一段对话里重新学回。
++                    </Text>
++                  )}
++                </Flex>
++              )}
++            </Box>
++          )}
++        </Box>
++      ))}
++    </Box>
++  );
++}
+diff --git a/src/renderer/src/components/aemeath/manage-page.tsx b/src/renderer/src/components/aemeath/manage-page.tsx
+index c757387..c1b5d96 100644
+--- a/src/renderer/src/components/aemeath/manage-page.tsx
++++ b/src/renderer/src/components/aemeath/manage-page.tsx
+@@ -31,8 +31,19 @@ import Live2DPage from './live2d-page';
+ import MemoryPage from './memory-page';
+ import VoicePage from './voice-page';
+ import DesktopPage from './desktop-page';
+-
+-type Page = 'overview' | 'model' | 'persona' | 'voice' | 'memory' | 'live2d' | 'desktop';
++import ExpressionPage from './expression-page';
++import JargonPage from './jargon-page';
++
++type Page =
++  | 'overview'
++  | 'model'
++  | 'persona'
++  | 'voice'
++  | 'memory'
++  | 'expression'
++  | 'jargon'
++  | 'live2d'
++  | 'desktop';
+ 
+ const NAV: { id: Page; label: string }[] = [
+   { id: 'overview', label: '概览' },
+@@ -40,6 +51,8 @@ const NAV: { id: Page; label: string }[] = [
+   { id: 'persona', label: '人设' },
+   { id: 'voice', label: '声音' },
+   { id: 'memory', label: '记忆' },
++  { id: 'expression', label: '表达学习' },
++  { id: 'jargon', label: '黑话词典' },
+   { id: 'live2d', label: 'Live2D' },
+   { id: 'desktop', label: '桌面与字幕' },
+ ];
+@@ -404,6 +417,10 @@ export default function ManagePage(): JSX.Element {
+ 
+         {page === 'memory' && <MemoryPage />}
+ 
++        {page === 'expression' && <ExpressionPage />}
++
++        {page === 'jargon' && <JargonPage />}
++
+         {page === 'live2d' && <Live2DPage />}
+ 
+         {page === 'desktop' && <DesktopPage />}
+diff --git a/src/renderer/src/services/aemeath-management.ts b/src/renderer/src/services/aemeath-management.ts
+index 56bd5a2..2fc32f8 100644
+--- a/src/renderer/src/services/aemeath-management.ts
++++ b/src/renderer/src/services/aemeath-management.ts
+@@ -620,3 +620,161 @@ export async function saveDesktopSettings(input: {
+     }),
+   });
+ }
++
++// ---------------------------------------------------------------------------
++// Expression and jargon learning (V2-T04)
++// ---------------------------------------------------------------------------
++
++/** One meaning of a learned item; jargon commonly has several. */
++export interface LearningMeaning {
++  kind_id: string;
++  meaning: string;
++  scenario: string;
++  /** `ok` or `needs_clarification`. */
++  state: string;
++  needs_clarification: boolean;
++}
++
++/** One source message a learned item came from. */
++export interface LearningSource {
++  message_id: string;
++  fragment: string;
++  content: string;
++  revision: number;
++}
++
++/** A learned expression or jargon word, as the page shows it. */
++export interface LearningItemView {
++  item_id: string;
++  /** `expression` or `jargon`; the two pages filter on it. */
++  kind: string;
++  content: string;
++  meaning: string;
++  scenario: string;
++  /** `candidate` / `enabled` / `disabled` / `revoked`. */
++  status: string;
++  origin: string;
++  manual_override: boolean;
++  check_result: string;
++  check_detail: string;
++  revision: number;
++  created_at: number;
++  updated_at: number;
++  last_used_at: number | null;
++  /** True while any meaning still needs the user to settle it. */
++  ambiguous: boolean;
++  meanings: LearningMeaning[];
++  sources: LearningSource[];
++}
++
++/**
++ * The learning page payload.
++ *
++ * `available` and `enabled` are separate from `items` on purpose: "nothing has
++ * been learned yet", "learning is switched off" and "learning is misconfigured"
++ * are three different situations, and rendering them all as an empty list
++ * leaves the user unable to tell whether to wait or to fix something.
++ */
++export interface LearningOverviewResponse {
++  ok: boolean;
++  available: boolean;
++  enabled: boolean;
++  error: string;
++  kind: string;
++  counts: Record<string, number>;
++  items: LearningItemView[];
++}
++
++/** Outcome of a learning edit, toggle, revoke or clarification. */
++export interface LearningActionResult {
++  ok: boolean;
++  error: string;
++  conflict: boolean;
++  item_id: string;
++  status: string;
++}
++
++/** List learned expressions or jargon. `kind` selects the page. */
++export async function fetchLearning(options: {
++  kind?: string;
++  status?: string;
++  query?: string;
++} = {}): Promise<LearningOverviewResponse> {
++  const params = new URLSearchParams();
++  if (options.kind) params.set('kind', options.kind);
++  if (options.status) params.set('status', options.status);
++  if (options.query) params.set('query', options.query);
++  const suffix = params.toString() ? `?${params.toString()}` : '';
++  return request<LearningOverviewResponse>(`/learning/overview${suffix}`);
++}
++
++/** The source messages behind one learned item. */
++export async function fetchLearningSources(
++  itemId: string,
++): Promise<{ ok: boolean; error: string; sources: LearningSource[] }> {
++  return request<{ ok: boolean; error: string; sources: LearningSource[] }>(
++    `/learning/${encodeURIComponent(itemId)}/sources`,
++  );
++}
++
++/**
++ * Apply a manual edit.
++ *
++ * An edit stamps the item as user-owned, and the backend will then refuse to
++ * let a later automatic result overwrite it. `expectedRevision` guards against
++ * two edits racing: a stale one comes back as a conflict rather than silently
++ * replacing the newer text.
++ */
++export async function editLearning(input: {
++  itemId: string;
++  content?: string;
++  meaning?: string;
++  scenario?: string;
++  expectedRevision?: number;
++}): Promise<LearningActionResult> {
++  return request<LearningActionResult>('/learning/edit', {
++    method: 'POST',
++    body: JSON.stringify({
++      item_id: input.itemId,
++      content: input.content ?? null,
++      meaning: input.meaning ?? null,
++      scenario: input.scenario ?? null,
++      expected_revision: input.expectedRevision ?? null,
++    }),
++  });
++}
++
++/** Enable or disable one item. `enabled` is required — never guessed. */
++export async function toggleLearning(
++  itemId: string,
++  enabled: boolean,
++): Promise<LearningActionResult> {
++  return request<LearningActionResult>('/learning/toggle', {
++    method: 'POST',
++    body: JSON.stringify({ item_id: itemId, enabled }),
++  });
++}
++
++/**
++ * Revoke one item.
++ *
++ * Terminal: the entry stops being used and cannot be re-learned from the same
++ * evidence. Restoring is deliberately not offered here for a revoked item.
++ */
++export async function revokeLearning(itemId: string): Promise<LearningActionResult> {
++  return request<LearningActionResult>('/learning/revoke', {
++    method: 'POST',
++    body: JSON.stringify({ item_id: itemId }),
++  });
++}
++
++/** Settle an ambiguous word's meanings with the user's answer. */
++export async function resolveLearningMeanings(
++  itemId: string,
++  meanings: { meaning: string; scenario?: string }[],
++): Promise<LearningActionResult> {
++  return request<LearningActionResult>('/learning/meanings', {
++    method: 'POST',
++    body: JSON.stringify({ item_id: itemId, meanings }),
++  });
++}
+\ No newline at end of file

@@ -56,3 +56,4 @@ htmlcov/
 # assets for future Live2D and voice work; large and machine-local, so they stay
 # out of source control. See docs/live2d-production.md.
 references/
+.chrome-manage-shot/

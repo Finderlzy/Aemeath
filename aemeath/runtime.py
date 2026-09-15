@@ -25,10 +25,11 @@ from typing import Any, Callable, Dict, List, Optional
 
 from loguru import logger
 
-from .adapters import EmbeddingAdapter, ExtractionAdapter
+from .adapters import EmbeddingAdapter, ExtractionAdapter, LearningAdapter
 from .config import AemeathConfig, load_config
 from .coordinator import CoordinatorHooks, EventCoordinator
 from .interfaces import EventSource, SpeechMode
+from .learning import LearningService, LearningStore
 from .memory import MemoryService, MemoryStore
 from .proactive import ProactiveScheduler
 from .screen import CaptureBackend, ScreenObserver, VisionAdapter
@@ -635,6 +636,7 @@ class AemeathRuntime:
     coordinator: EventCoordinator
     scheduler: ProactiveScheduler
     metrics: MetricsRecorder
+    learning: Optional[LearningService] = None
     screen: Optional[ScreenObserver] = None
     bridge: Any = None
     capabilities: Dict[str, CapabilityStatus] = field(default_factory=dict)
@@ -645,6 +647,9 @@ class AemeathRuntime:
     def status(self) -> Dict[str, Any]:
         """Return a serialisable status snapshot for the settings screen."""
         state = self.situation.state
+        learning_counts = (
+            self.learning.store.counts() if self.learning is not None else {}
+        )
         return {
             "mode": state.mode.value,
             "state_version": self.situation.state_version,
@@ -655,6 +660,7 @@ class AemeathRuntime:
             "voice_allowed": state.voice_allowed,
             "memories": len(self.memory.store.list_memories()),
             "pending_tasks": len(self.memory.store.pending_tasks()),
+            "learning_counts": learning_counts,
             "data_dir": str(self.config.data_dir),
             "capabilities": {
                 name: capability.to_dict()
@@ -687,6 +693,7 @@ class AemeathRuntime:
             return
         loop = asyncio.get_running_loop()
         self.tasks["memory"] = loop.create_task(self._memory_worker())
+        self.tasks["learning"] = loop.create_task(self._learning_worker())
         self.tasks["proactive"] = loop.create_task(self._proactive_worker())
         logger.info("Aemeath background tasks started ({}).", len(self.tasks))
 
@@ -722,6 +729,48 @@ class AemeathRuntime:
                 raise
             except Exception as exc:  # pragma: no cover - defensive
                 logger.error("Memory worker iteration failed: {}", exc)
+
+    async def _learning_worker(self) -> None:
+        """Process queued expression and jargon learning until cancelled.
+
+        Separate from the memory worker on purpose. Learning is a *different*
+        model call with a different failure mode, and the requirements are
+        explicit that a learning outage must not affect chatting or memory. Two
+        workers mean one being slow or broken cannot stall the other.
+        """
+        interval = self.config.learning.interval_seconds
+        while True:
+            try:
+                await asyncio.sleep(interval)
+                service = self.learning
+                if service is None or not service.available:
+                    continue
+                await service.run_pending_learning(self.persona_text())
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.error("Learning worker iteration failed: {}", exc)
+
+    def persona_text(self) -> str:
+        """The active persona, read from the authoritative config file.
+
+        Read per call rather than cached so a persona edit takes effect for the
+        consistency check without restarting the process.
+        """
+        try:
+            from .config import resolve_config_path
+            from .persona import resolve_persona
+
+            import yaml
+
+            path = resolve_config_path()
+            if not path.is_file():
+                return ""
+            document = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+            return resolve_persona(document if isinstance(document, dict) else {})
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("Could not read persona for the learning check: {}", exc)
+            return ""
 
     async def _proactive_worker(self) -> None:
         """Drive proactive checks on a timer until cancelled.
@@ -767,6 +816,7 @@ def build_runtime(
     config: Optional[AemeathConfig] = None,
     embedding: Optional[EmbeddingAdapter] = None,
     extraction: Optional[ExtractionAdapter] = None,
+    learning: Optional[LearningAdapter] = None,
     vision: Optional[VisionAdapter] = None,
     capture: Optional[CaptureBackend] = None,
     hooks: Optional[CoordinatorHooks] = None,
@@ -822,6 +872,18 @@ def build_runtime(
             name="extraction", configured=True, enabled=True, detail="injected"
         )
 
+    if learning is None:
+        learning, capabilities["learning"] = adapters.build_learning()
+    else:
+        # An explicitly injected adapter is a test double for an enabled
+        # capability; production resolution goes through the factory above.
+        capabilities["learning"] = CapabilityStatus(
+            name="learning",
+            configured=True,
+            enabled=True,
+            detail="injected",
+        )
+
     if vision is None:
         vision, capabilities["vision"] = adapters.build_vision()
     else:
@@ -846,6 +908,15 @@ def build_runtime(
         recent_turns=resolved.memory.recent_turns,
         recall_limit=resolved.memory.recall_limit,
         summary_every=resolved.memory.experience_summary_every,
+    )
+    # Learning shares the memory database so one forgetting operation reaches
+    # both, but keeps its own tables and service: a learned style note is not a
+    # remembered fact and must not be retrievable as one.
+    learning_service = LearningService(
+        LearningStore(resolved.db_path),
+        adapter=learning,
+        enabled=resolved.learning.enabled,
+        max_prompt_items=resolved.learning.max_prompt_items,
     )
     scheduler = ProactiveScheduler(
         cooldown_seconds=resolved.proactive.cooldown_seconds,
@@ -882,6 +953,7 @@ def build_runtime(
         screen=screen,
         metrics=metrics,
         config=resolved,
+        learning=learning_service,
     )
 
     async def _display_text(turn_id, text) -> None:
@@ -900,6 +972,7 @@ def build_runtime(
         config=resolved,
         situation=situation,
         memory=memory,
+        learning=learning_service,
         coordinator=coordinator,
         scheduler=scheduler,
         metrics=metrics,

@@ -661,3 +661,38 @@ V2-T01 配置 schema／修订语义／唯一会话与受控播放约定
 自己也改 `App.tsx`（加入 `AemeathProvider`）。若在未套用 `0001` 的树上生成，补丁会把
 该 import 记成新增，套用时必然 `patch does not apply`。重生后已用干净检出按序套用
 `0001`→`0002` 验证，6 个文件与工作副本逐字节一致。
+
+### V2-T04 实现记录：表达与黑话学习（2026-09-15）
+
+在 V2-T01 与 V2-T02 基础上交付自动学习闭环。基线 `350c7f5`，任务分支
+`issue-17-expression-jargon-learning`；验收证据见
+[验收记录第二十节](acceptance.md#二十v2-t04-表达与黑话学习2026-09-15)。
+
+**模块结构**：
+
+| 模块 | 职责 |
+| --- | --- |
+| `aemeath/learning.py` | 数据存储（`LearningStore`）、候选检查与学习流水线（`LearningService`）、稳定指纹与防重 |
+| `aemeath/adapters.py` | 扩展 `LearningAdapter` / `FakeLearningAdapter` / `OpenAICompatibleLearning`，以及 `AdapterFactory.build_learning()` |
+| `aemeath/prompts.py` | `build_system_prompt` 增加 `learnings` 参数与防越权规则文案 |
+| `aemeath/agent.py` | 轮次提示词组装时现读 `prompt_items()`（无缓存，禁用立即生效） |
+| `aemeath/runtime.py` | 装配 `learning` 能力与独立的后台 worker `_learning_worker` |
+| `aemeath/bridge.py` | 完成轮次时同步队列 learning 任务 |
+| `aemeath/memory.py` | `forget` / `forget_by_message` / `delete_memory` 接入学习衍生内容级联清理 |
+| `aemeath/management/learning.py` | 管理用例层（`LearningAdminService`） |
+| `aemeath/management/routes.py` | 挂载 5 个学习管理端点（列表、来源、编辑、启禁/恢复、撤销、歧义消除） |
+| 前端两页与客户端 | `expression-page.tsx`、`jargon-page.tsx`、`learning-page.tsx`，并入 `docs/patches/web/0004-aemeath-learning-pages.patch` |
+
+**六项关键设计**：
+
+1. **学习绝不改写人设。** 提示词按「人设 → 相关记忆 → 表达与用词参考」顺序组装，文案明确声明「不能覆盖上面的人设、不是关于用户的事实」；自动学习绝不修改配置文件。
+2. **两页同构，字段区分。** 表达与黑话共用一套底层模型，`kind` 区分；表达重场景与口吻，黑话重词义与语境。
+3. **同词歧义保留多义。** 新语境下产生新含义时在 `learning_kinds` 追加新行，绝不用覆盖旧词义解决歧义；含义不明确标记 `needs_clarification`，页面显式标识并暂不注入提示词。
+4. **人工编辑绝对优先。** 一旦经界面编辑置 `manual_override=1`，后续自动提取直接跳过该条，不覆盖人工修订。
+5. **防重只在指纹层，不留已遗忘正文。** 撤销或禁用时只存 `sha256(kind + content)` 指纹与来源指纹，不保留原文；来源消息遗忘时该条衍生学习与证据彻底清除，防重表绝不反向泄露已遗忘内容。
+6. **学习故障完全隔离。** 学习是独立的后台 worker，模型报错、超时或配置缺失只记日志，绝不影响普通对话和记忆，也不假称学会。
+
+**复验中修复的真实缺陷**：
+
+*自身复述检查误判用户引入的新词。* 初版逻辑为「只要候选文本出现在 assistant 的历史回复中即判定为自身复述」，导致用户明确教了「冒烟测试」、爱弥斯在回答中复述「行，那我跑冒烟测试」时，该条新词被误判为自身复述而拒绝启用。真实模型探针跑出该失败；修复为「只有当 assistant 回复包含该词、且当前任务的所有 user 消息中均未包含时」才判定为自身复述。该缺陷已有针对性回归测试（`test_class3_keeps_a_phrase_the_user_actually_introduced`）并做了**变异验证**（改回原逻辑即失败）。
+

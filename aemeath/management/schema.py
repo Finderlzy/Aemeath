@@ -451,10 +451,133 @@ class DesktopSettingsRequest(BaseModel):
     )
 
 
+# ----------------------------------------------------------------------
+# Expression and jargon learning (V2-T04)
+# ----------------------------------------------------------------------
+
+
+class LearningMeaning(BaseModel):
+    """One meaning of a learned item.
+
+    Jargon commonly has more than one sense, and the design forbids resolving
+    that by overwriting: each sense is its own row, so the page renders a list.
+    """
+
+    kind_id: str = ""
+    meaning: str = ""
+    scenario: str = ""
+    #: ``ok`` or ``needs_clarification``. An unsettled meaning is shown as such
+    #: and is deliberately not injected into any prompt.
+    state: str = "ok"
+    needs_clarification: bool = False
+
+
+class LearningEvidenceView(BaseModel):
+    """One source message a learned item came from."""
+
+    message_id: str = ""
+    fragment: str = ""
+    content: str = ""
+    revision: int = 1
+
+
+class LearningItemView(BaseModel):
+    """A learned expression or jargon word, as the page shows it."""
+
+    item_id: str = ""
+    #: ``expression`` or ``jargon``; the two management pages filter on it.
+    kind: str = ""
+    content: str = ""
+    meaning: str = ""
+    scenario: str = ""
+    #: ``candidate`` / ``enabled`` / ``disabled`` / ``revoked``.
+    status: str = ""
+    origin: str = "auto"
+    manual_override: bool = False
+    check_result: str = ""
+    check_detail: str = ""
+    revision: int = 1
+    created_at: float = 0.0
+    updated_at: float = 0.0
+    last_used_at: Optional[float] = None
+    #: True when any meaning is still waiting for the user to settle it.
+    ambiguous: bool = False
+    meanings: List[LearningMeaning] = Field(default_factory=list)
+    sources: List[LearningEvidenceView] = Field(default_factory=list)
+
+
+class LearningOverviewResponse(BaseModel):
+    """Everything an expression or jargon page needs.
+
+    ``available`` and ``enabled`` are separate facts, and ``error`` carries the
+    reason when learning is not running. "Nothing learned yet", "learning is
+    switched off" and "learning is misconfigured" must not render the same way.
+    """
+
+    ok: bool = True
+    available: bool = False
+    enabled: bool = False
+    error: str = ""
+    kind: str = ""
+    counts: Dict[str, int] = Field(default_factory=dict)
+    items: List[LearningItemView] = Field(default_factory=list)
+
+
+class LearningListRequest(BaseModel):
+    """Filter the learning list."""
+
+    kind: str = Field(default="", description="expression / jargon; empty is both")
+    status: str = Field(default="", description="state filter; empty is all")
+    query: str = Field(default="", description="Substring filter")
+
+
+class LearningEditRequest(BaseModel):
+    """Apply a manual edit; it beats any later automatic result."""
+
+    item_id: str = ""
+    content: Optional[str] = None
+    meaning: Optional[str] = None
+    scenario: Optional[str] = None
+    expected_revision: Optional[int] = Field(
+        default=None,
+        description="Revision the client read; guards against a concurrent edit",
+    )
+
+
+class LearningActionRequest(BaseModel):
+    """Enable / disable / revoke one item.
+
+    ``enabled`` is required for the toggle endpoint because an absent value
+    would have to be guessed, and guessing here means silently enabling
+    something the user asked to disable.
+    """
+
+    item_id: str = ""
+    enabled: Optional[bool] = Field(
+        default=None, description="Required for the toggle action"
+    )
+
+
+class LearningMeaningRequest(BaseModel):
+    """Settle an ambiguous word's meanings with the user's answer."""
+
+    item_id: str = ""
+    meanings: List[LearningMeaning] = Field(default_factory=list)
+
+
+class LearningActionResult(BaseModel):
+    """Outcome of an edit, toggle, revoke or clarification."""
+
+    ok: bool = False
+    error: str = ""
+    conflict: bool = False
+    item_id: str = ""
+    status: str = ""
+
+
 def to_dict(model: BaseModel) -> Dict[str, Any]:
     """Serialise a response model to plain JSON-compatible data."""
     return model.model_dump()
-
 
 __all__ = [
     "SaveModelRequest",
@@ -489,5 +612,14 @@ __all__ = [
     "Live2DSaveResult",
     "DesktopSettingsResponse",
     "DesktopSettingsRequest",
+    "LearningMeaning",
+    "LearningEvidenceView",
+    "LearningItemView",
+    "LearningOverviewResponse",
+    "LearningListRequest",
+    "LearningEditRequest",
+    "LearningActionRequest",
+    "LearningMeaningRequest",
+    "LearningActionResult",
     "to_dict",
 ]

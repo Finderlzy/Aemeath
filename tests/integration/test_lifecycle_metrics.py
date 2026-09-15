@@ -92,7 +92,11 @@ class TestConnectionLifecycle:
         runtime = harness.runtime
 
         await runtime.start()
-        assert set(runtime.tasks) == {"memory", "proactive"}
+        # Three workers: memory extraction, expression/jargon learning and the
+        # proactive timer. Learning has its own worker rather than sharing the
+        # memory one, because a slow or broken learning provider must not be
+        # able to stall memory extraction or chatting.
+        assert set(runtime.tasks) == {"memory", "learning", "proactive"}
         assert all(not task.done() for task in runtime.tasks.values())
 
         await runtime.stop()
@@ -155,7 +159,7 @@ class TestConnectionLifecycle:
             await _asyncio.sleep(0)
 
             runtime = get_runtime()
-            assert set(runtime.tasks) == {"memory", "proactive"}, (
+            assert set(runtime.tasks) == {"memory", "learning", "proactive"}, (
                 "creating the agent through the factory must start the "
                 "runtime's background workers"
             )

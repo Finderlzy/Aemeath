@@ -30,6 +30,10 @@ __all__ = [
     "ExtractionAdapter",
     "FakeExtractionAdapter",
     "OpenAICompatibleExtraction",
+    "LearningCandidate",
+    "LearningAdapter",
+    "FakeLearningAdapter",
+    "OpenAICompatibleLearning",
     "OpenAICompatibleVision",
     "GPTSoVITSAdapter",
     "SenseVoiceAdapter",
@@ -396,6 +400,249 @@ class OpenAICompatibleExtraction(ExtractionAdapter):
 
         logger.debug("Extraction produced {} item(s).", len(facts))
         return facts
+
+
+@dataclass
+class LearningCandidate:
+    """One expression or jargon item proposed by the learning model.
+
+    Attributes:
+        kind: ``expression`` (a way of speaking) or ``jargon`` (a word with a
+            special meaning between these two people).
+        content: The expression text, or the jargon word itself.
+        meaning: What a jargon word means. Empty for expressions.
+        scenario: When the item applies. The prompt uses it to decide whether a
+            phrase fits the current context, so an item without one is much less
+            useful — the checker treats it as a weaker candidate.
+        fragment: The exact span of the source message this came from, used as
+            verifiable provenance.
+    """
+
+    kind: str = "expression"
+    content: str = ""
+    meaning: str = ""
+    scenario: str = ""
+    fragment: str = ""
+
+
+#: The two learning kinds, fixed here so adapters, storage and the UI agree.
+LEARNING_KINDS = ("expression", "jargon")
+
+
+class LearningAdapter:
+    """Interface for learning expression and jargon from conversation."""
+
+    async def learn(
+        self, messages: Sequence[Dict[str, str]]
+    ) -> List[LearningCandidate]:
+        """Propose expression or jargon items worth learning.
+
+        Args:
+            messages: Conversation turns, oldest first, each with ``role`` and
+                ``content``. Only user turns may carry new evidence.
+
+        Returns:
+            Proposed items. An empty list is a normal answer: most turns teach
+            nothing, and inventing an item to look productive is the failure
+            mode this whole feature has to avoid.
+        """
+        raise NotImplementedError
+
+
+class FakeLearningAdapter(LearningAdapter):
+    """Learning stand-in for deterministic tests.
+
+    Args:
+        candidates: Fixed output. When ``None``, parses ``黑话：`` / ``表达：``
+            markers out of user messages so a test can drive the whole pipeline
+            from conversation text alone.
+    """
+
+    def __init__(self, candidates: Optional[List[LearningCandidate]] = None) -> None:
+        """Optionally fix the output."""
+        self.candidates = candidates
+        self.calls: List[Sequence[Dict[str, str]]] = []
+        self.fail = False
+
+    async def learn(
+        self, messages: Sequence[Dict[str, str]]
+    ) -> List[LearningCandidate]:
+        """Return configured candidates, or parse markers from user turns."""
+        self.calls.append(messages)
+        if self.fail:
+            raise ModelError("learning provider unavailable")
+        if self.candidates is not None:
+            return list(self.candidates)
+
+        results: List[LearningCandidate] = []
+        for message in messages:
+            if message.get("role") != "user":
+                continue
+            content = message.get("content", "")
+            for match in re.finditer(
+                r"黑话[：:]\s*(\S+)\s*[=＝]\s*(.+)", content
+            ):
+                results.append(
+                    LearningCandidate(
+                        kind="jargon",
+                        content=match.group(1).strip(),
+                        meaning=match.group(2).strip(),
+                        scenario="",
+                        fragment=match.group(0).strip(),
+                    )
+                )
+            for match in re.finditer(r"表达[：:]\s*(.+)", content):
+                results.append(
+                    LearningCandidate(
+                        kind="expression",
+                        content=match.group(1).strip(),
+                        scenario="",
+                        fragment=match.group(0).strip(),
+                    )
+                )
+        return results
+
+
+class OpenAICompatibleLearning(LearningAdapter):
+    """Learning adapter using a chat model with a JSON contract.
+
+    Two prompts rather than one: an expression and a word meaning are different
+    questions ("how does this person phrase things" versus "what does this word
+    mean between them"), and asking both at once produced items that answered
+    neither. The two are requested in separate calls so each answer is judged on
+    its own terms, and a malformed answer is discarded rather than stored.
+    """
+
+    _EXPRESSION_SYSTEM = (
+        "你在观察一段用户与 AI 伙伴的对话。请找出**用户**反复或明显使用的说话方式，"
+        "例如特定的口头语、称呼、句式、语气习惯。\n"
+        "只记录确实出现过的表达，不要总结性格，不要评价，不要记录用户的事实信息。\n"
+        "不要记录 AI 伙伴自己的说法——那是角色已有的风格，不是新学到的。\n"
+        "只输出 JSON，格式："
+        "{\"items\": [{\"content\": \"表达方式\", \"scenario\": \"适用场景\", "
+        "\"fragment\": \"这句话在原文中的片段\"}]}\n"
+        "没有值得记录的就说 {\"items\": []}。宁可少记，不要凑数。"
+    )
+
+    _JARGON_SYSTEM = (
+        "你在观察一段用户与 AI 伙伴的对话。请找出其中具有**特殊含义**的词或缩写，"
+        "例如用户自己的简称、圈内说法、特定项目里的代号。\n"
+        "只记录用户确实使用过的词，并说明它在这个语境下的含义。\n"
+        "如果同一个词在不同语境下有不同含义，请分别给出多条，不要合并成一条。\n"
+        "含义不明确的，把 meaning 写成「含义不明确」，不要猜。\n"
+        "只输出 JSON，格式："
+        "{\"items\": [{\"content\": \"词语\", \"meaning\": \"含义\", "
+        "\"scenario\": \"适用场景\", \"fragment\": \"原文片段\"}]}\n"
+        "没有就说 {\"items\": []}。"
+    )
+
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        model: str,
+        timeout: float = 60.0,
+    ) -> None:
+        """Store connection settings."""
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
+        self.model = model
+        self.timeout = timeout
+
+    async def learn(
+        self, messages: Sequence[Dict[str, str]]
+    ) -> List[LearningCandidate]:
+        """Ask for expressions and jargon, validating both responses.
+
+        A failure of one kind does not discard the other: they are independent
+        questions and a model that answers one well still produced usable
+        output. Only an unparseable answer is dropped, and the drop is logged.
+        """
+        if not self.api_key:
+            raise AuthError("learning API key is not configured")
+
+        transcript = "\n".join(
+            f"{m.get('role', 'user')}: {m.get('content', '')}" for m in messages
+        )
+
+        results: List[LearningCandidate] = []
+        errors: List[str] = []
+        for kind, system in (
+            ("expression", self._EXPRESSION_SYSTEM),
+            ("jargon", self._JARGON_SYSTEM),
+        ):
+            try:
+                items = await self._ask(system, transcript, kind)
+            except ModelError as exc:
+                errors.append(f"{kind}: {exc}")
+                continue
+            results.extend(items)
+
+        if errors and not results:
+            # Nothing usable came back at all: surface it so the task is retried
+            # instead of being recorded as "learned nothing".
+            raise ModelError("; ".join(errors))
+        for error in errors:
+            logger.warning("Learning call for one kind failed: {}", error)
+        return results
+
+    async def _ask(
+        self, system: str, transcript: str, kind: str
+    ) -> List[LearningCandidate]:
+        """Run one learning call and validate its structure."""
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": transcript},
+            ],
+            "temperature": 0.0,
+        }
+
+        try:
+            async with http_client(self.timeout) as client:
+                response = await client.post(
+                    f"{self.base_url}/chat/completions",
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                    json=payload,
+                )
+        except Exception as exc:
+            raise ModelError(f"learning request failed: {exc}") from exc
+
+        if response.status_code in (401, 403):
+            raise AuthError("learning provider rejected credentials")
+        if response.status_code == 429:
+            raise RateLimitError("learning provider rate limited the request")
+        if response.status_code >= 400:
+            raise ModelError(
+                f"learning provider returned HTTP {response.status_code}"
+            )
+
+        try:
+            content = response.json()["choices"][0]["message"]["content"]
+            cleaned = re.sub(r"^```(?:json)?|```$", "", content.strip(), flags=re.M)
+            data = json.loads(cleaned)
+        except Exception as exc:
+            raise ModelError(f"learning returned unparseable output: {exc}") from exc
+
+        items: List[LearningCandidate] = []
+        for item in data.get("items", []) or []:
+            if not isinstance(item, dict):
+                continue
+            text = str(item.get("content", "")).strip()
+            if not text:
+                continue
+            items.append(
+                LearningCandidate(
+                    kind=kind,
+                    content=text,
+                    meaning=str(item.get("meaning", "") or "").strip(),
+                    scenario=str(item.get("scenario", "") or "").strip(),
+                    fragment=str(item.get("fragment", "") or "").strip(),
+                )
+            )
+        logger.debug("Learning produced {} {} item(s).", len(items), kind)
+        return items
 
 
 class OpenAICompatibleVision:
@@ -800,6 +1047,68 @@ class AdapterFactory:
 
         return adapter, self._status(
             "extraction",
+            configured=True,
+            enabled=True,
+            detail=f"{provider.provider}:{provider.model}",
+        )
+
+    def build_learning(self):
+        """Build the expression / jargon learning adapter and report its state.
+
+        Two conditions must both hold, and they fail differently on purpose:
+
+        * ``learning.enabled`` is the user's decision. When it is off the
+          capability is reported as ``disabled`` **even if a provider is fully
+          configured** — sending conversation text to a model is a behaviour the
+          user switches on, never something that starts because a URL was filled
+          in.
+        * the provider must resolve a credential. Enabled but uncredentialed is
+          an *error*, not a silent downgrade, so "learning is on" can never be
+          true while nothing is actually being learned.
+        """
+        if not self._config.learning.enabled:
+            return None, self._status(
+                "learning",
+                configured=False,
+                enabled=False,
+                detail=(
+                    "learning is switched off (set character_config.aemeath_config"
+                    ".learning.enabled to true to enable it)"
+                ),
+            )
+
+        provider = self._config.providers.learning
+        if not provider.enabled or not provider.base_url or not provider.model:
+            return None, self._status(
+                "learning",
+                configured=False,
+                enabled=False,
+                detail="not configured (set providers.learning in config)",
+            )
+
+        api_key = provider.resolve_api_key()
+        if not api_key:
+            return None, self._status(
+                "learning",
+                configured=True,
+                enabled=False,
+                error=f"environment variable {provider.api_key_env} is not set",
+            )
+
+        try:
+            adapter = OpenAICompatibleLearning(
+                base_url=provider.base_url,
+                api_key=api_key,
+                model=provider.model,
+                timeout=provider.timeout_seconds,
+            )
+        except Exception as exc:  # pragma: no cover - constructor is trivial
+            return None, self._status(
+                "learning", configured=True, enabled=False, error=str(exc)
+            )
+
+        return adapter, self._status(
+            "learning",
             configured=True,
             enabled=True,
             detail=f"{provider.provider}:{provider.model}",

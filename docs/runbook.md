@@ -343,35 +343,45 @@ Invoke-RestMethod -Uri 'http://127.0.0.1:12393/aemeath/manage/overview'
 水平／垂直偏移。没有模型时给出明确说明与模型目录路径，仍可完成配置，不会空白失联；
 聊天、语音与字幕不受影响。示例模型标注为示例，不是正式爱弥斯模型。
 
+**表达学习与黑话词典页（V2-T04）。** 分别查看爱弥斯学到的表达方式与黑话词汇：
+- 自动启用：通过检查（有真实来源、非自身复述、不与核心人设冲突）后自动生效，注入后续回复。
+- 来源可见：每条展开可见来源消息与原文片段，点击可查看完整语境。
+- 用户主控：支持编辑词义/语境（人工修改置 `manual_override`，后续不再被自动覆盖）、
+  禁用（停止使用并写防重）、恢复（显式重新启用）、撤销（终态，永久不再重学）。
+- 歧义词处理：同词多义保留多条，不明确含义标记「待澄清」且暂不注入，提供填写含义入口。
+- 遗忘联动：当来源消息在「记忆」页被遗忘时，相关衍生学习记录自动级联清理。
+
 也可直接用 API 核对：
 
 ```powershell
 Invoke-RestMethod -Uri 'http://127.0.0.1:12393/aemeath/manage/memory/list'
 Invoke-RestMethod -Uri 'http://127.0.0.1:12393/aemeath/manage/voice/overview'
 Invoke-RestMethod -Uri 'http://127.0.0.1:12393/aemeath/manage/live2d/overview'
+Invoke-RestMethod -Uri 'http://127.0.0.1:12393/aemeath/manage/learning/overview?kind=expression'
+Invoke-RestMethod -Uri 'http://127.0.0.1:12393/aemeath/manage/learning/overview?kind=jargon'
 ```
 
-服务运行中可跑两个端到端探针：
+服务运行中可跑三个端到端探针：
 
 ```powershell
 .\vendor\Open-LLM-VTuber\.venv\Scripts\python.exe scripts\probe_management_v2.py
 .\vendor\Open-LLM-VTuber\.venv\Scripts\python.exe scripts\probe_memory_lifecycle.py
+.\vendor\Open-LLM-VTuber\.venv\Scripts\python.exe scripts\probe_learning_learning.py
 ```
 
-前者核对全部管理端点可达、错误码正确、响应不含凭据；后者真实走一遍
-「写入记忆 → 纠正 → 遗忘 → 重开数据库」，确认遗忘只移除目标片段而保留同一条消息里的
-其他内容。
+前两者核对管理端点与记忆生命周期；后者走真实 EasyCLIProxyAPI 对话，实际评估学习效果
+（验证新用语被学到、语境使用、误学拒绝、撤销生效且防重不回学）。
 
 ### 界面截图
 
-服务运行中可用无头 Chrome 抓取六个页面（截图同时核对页面确实渲染出内容，
+服务运行中可用无头 Chrome 抓取九个页面（截图同时核对页面确实渲染出内容，
 避免存下空白页）：
 
 ```powershell
 .\vendor\Open-LLM-VTuber\.venv\Scripts\python.exe scripts\capture_manage_pages.py
 ```
 
-产物在 `docs/images/manage-*.png`：概览、模型、人设、声音、记忆、Live2D。
+产物在 `docs/images/manage-*.png`：概览、模型、人设、声音、记忆、表达学习、黑话词典、Live2D、桌面与字幕。
 
 | 页面 | 截图 |
 | --- | --- |
@@ -380,7 +390,10 @@ Invoke-RestMethod -Uri 'http://127.0.0.1:12393/aemeath/manage/live2d/overview'
 | 人设 | ![人设](images/manage-persona.png) |
 | 声音 | ![声音](images/manage-voice.png) |
 | 记忆 | ![记忆](images/manage-memory.png) |
+| 表达学习 | ![表达学习](images/manage-expression.png) |
+| 黑话词典 | ![黑话词典](images/manage-jargon.png) |
 | Live2D | ![Live2D](images/manage-live2d.png) |
+| 桌面与字幕 | ![桌面与字幕](images/manage-desktop.png) |
 
 ## 状态与记忆管理
 

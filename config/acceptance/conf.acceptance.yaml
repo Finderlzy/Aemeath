@@ -184,6 +184,14 @@ character_config:
       similarity_floor: 0.40
       # 后台提取任务的处理间隔（秒）
       extraction_interval_seconds: 5.0
+    # 表达与黑话学习（V2-T04）。默认关闭；验收配置显式开启，以便真实对话的
+    # 学习效果评估能运行。学习用的模型连接见 providers.learning。
+    learning:
+      enabled: true
+      interval_seconds: 5.0
+      # 每次注入提示词的最大条目数。学习结果是措辞参考而非知识库，
+      # 不能把全部条目都塞进每一轮提示词。
+      max_prompt_items: 8
     proactive:
       # 首次连通测试期间关闭，避免后台请求干扰；分项验收时按需开启。
       cooldown_seconds: 900
@@ -228,6 +236,15 @@ character_config:
         base_url: 'http://127.0.0.1:8317/v1'
         model: 'gemini-3.8-flash-high'
         api_key_env: 'AEMEATH_VISION_API_KEY'
+        timeout_seconds: 60
+      learning:
+        # 表达与黑话学习（V2-T04）使用的模型。与提取分开配置，便于单独
+        # 换模型或关闭，而不影响记忆提取。
+        enabled: true
+        provider: 'openai_compatible'
+        base_url: 'http://127.0.0.1:8317/v1'
+        model: 'deepseek-v4.1-flash'
+        api_key_env: 'AEMEATH_LEARNING_API_KEY'
         timeout_seconds: 60
 
 live_config:

@@ -1145,3 +1145,52 @@ hash 产物、部署到 `frontend/`，并**断言部署的 `index.html` 引用�
   「管理界面 ＋ 桌面角色」的共同回归，其中 R1／R2 已通过，但课堂、TTS 失败与重连
   等异常路径的字幕表现仍待确认；完整 v2 另见 V2-T04～V2-T07。
 
+## 二十、V2-T04 表达与黑话学习（2026-09-15）
+
+**任务**：[#17](https://github.com/Finderlzy/Aemeath/issues/17)（V2-T04，V2-M3 表达与黑话学习）。**已关闭（completed）**。
+**基线**：远端 `main` 的 `350c7f5`，任务分支 `issue-17-expression-jargon-learning`。
+**范围**：仅从用户与爱弥斯的对话自动学习表达与黑话，经检查通过后自动应用，支持人工编辑、禁用、撤销与遗忘联动；核心人设不被自动改写。
+**里程碑**：随本任务关闭，V2-M3（表达与黑话学习）完成。
+
+### 开发前门禁：学习评估样例集固化
+
+架构文档要求开工前固化五类场景的独立样例集。已固化在 `tests/integration/test_learning_samples.py`（18 个用例），覆盖正确学习、语境使用、误学拒绝、撤销／遗忘、重启保持五类，并先行跑出有效 Red 再实现至 Green。
+
+### 验收矩阵（九项逐项对照）
+
+| 验收项 | 结论 | 证据 |
+| --- | --- | --- |
+| 学习条目可追溯到具体来源消息，界面可见来源与语境 | 通过 | 每条条目记录 `learning_evidence`（消息 ID 与片段），`LearningAdminService.sources()` 暴露，界面展开可见原文；`test_a1_*` 通过 |
+| 合适语境自然使用；不相关语境不强行使用 | 通过 | 提示词注入携带 `scenario` 并在文案中明确限制「与当前语境不符时不要使用」；`test_a2_*` 通过 |
+| 歧义词保留不同语境含义，不用覆盖旧词义解决歧义 | 通过 | `learning_kinds` 表多行记录不同含义；未明确者置 `needs_clarification`，页面显式标识且暂不注入；`test_a3_*` 通过 |
+| 人工纠正优先生效，不被后续自动结果覆盖 | 通过 | 人工编辑置 `manual_override=1`，后续自动流水线遇同指纹跳过更新；`test_a4_*` 通过 |
+| 禁用与撤销后不再注入，且不能从同一证据立即重学；重启保持 | 通过 | 禁用/撤销记录 sha256 来源指纹，终态不可逆；重开数据库后依然生效；`test_a5_*`、`test_class5_*` 通过 |
+| 来源被遗忘后衍生学习内容按同一遗忘边界处理 | 通过 | `MemoryStore.forget/forget_by_message/delete_memory` 级联清理 `learning_evidence`，唯一来源失效时条目自动清除；`test_a6_*` 通过 |
+| 学习服务不可用时普通聊天不受影响，且不假称已经学会 | 通过 | 独立后台 worker，任何模型/网络异常只记日志不抛出到对话；`test_a7_*` 通过 |
+| 核心人设不被任何自动学习改写 | 通过 | 提示词顺序固定人设在最前、学习在后且限定为参考；断言配置文件逐字节不变；`test_a8_*` 通过 |
+| 管理界面与端到端闭环 | 通过 | 表达学习／黑话词典两页并入 `web/0004` 补丁，Chrome 截图渲染正常，真实服务 probe 29/29、内存生命周期 16/16 全部通过 |
+
+### 真实模型效果评估（`scripts/probe_learning_learning.py`）
+
+通过真实 EasyCLIProxyAPI（`deepseek-v4.1-flash`）走真实对话实测：
+- 命中预期学习用语：`冒烟测试`（黑话）、`先放着`、`回头再说`（表达方式）；
+- 真实系统提示词中成功注入 8 条学习参考并包含限制性文案；
+- 真实撤销一条后，下一轮提示词立即排除该条；
+- 再次触发相同输入，由于指纹防重生效，未被重新学回；
+- 自身复述的 `早点休息` 被模型/规则正确识别并拒绝启用；
+- 修复了真实暴露的「自身复述误判用户引入的新词」缺陷；
+- 实测结果 **6/6 checks passed, LEARNING EVAL PASSED**。
+
+### 真实服务端到端与截屏证据
+
+- `scripts/probe_management_v2.py`：**29/29 PASSED**（新增学习概览、类型过滤、参数校验 6 项）；
+- `scripts/probe_memory_lifecycle.py`：**16/16 PASSED**（记忆与遗忘基线完全保持）；
+- `scripts/capture_manage_pages.py`：新增两页截屏，无头 Chrome 真实渲染，产物见 `docs/images/manage-expression.png`、`manage-jargon.png`。
+
+### 回归基线
+
+`533 passed, 7 deselected`（本次新增 59 项测试，覆盖样例集、一致性回归与管理路由）。
+前端 `npm run typecheck` 本次改动文件零错误；`npm run build:web` 成功并部署至 `frontend/`。
+`scripts/check-secrets.ps1` 扫描 125 个文件全部 PASS。
+
+

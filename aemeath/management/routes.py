@@ -24,6 +24,9 @@ from loguru import logger
 
 from .schema import (
     DesktopSettingsRequest,
+    LearningActionRequest,
+    LearningEditRequest,
+    LearningMeaningRequest,
     Live2DSaveRequest,
     MemoryCorrectRequest,
     MemoryForgetRequest,
@@ -438,6 +441,124 @@ def install_management_routes(app, config_path=None) -> None:
                 "character_scale": payload.character_scale,
             },
             expected_revision=payload.expected_revision,
+        )
+        return _respond(result)
+
+    # ------------------------------------------------------------------
+    # Expression and jargon learning (V2-T04)
+    # ------------------------------------------------------------------
+
+    def _learning_service():
+        """Build the learning admin service on the runtime's own service.
+
+        One service for the life of the process, because the entries the page
+        edits are the entries the conversation path reads: a second service
+        would eventually disagree about which items are enabled.
+        """
+        from .learning import LearningAdminService
+
+        from ..runtime import get_runtime
+
+        runtime = get_runtime()
+        return LearningAdminService(
+            getattr(runtime, "learning", None),
+            store=getattr(getattr(runtime, "learning", None), "store", None),
+        )
+
+    @router.get("/learning/overview")
+    async def learning_overview(request: Request, kind: str = "", status: str = "", query: str = ""):
+        """List learned expressions or jargon.
+
+        ``kind`` selects the page (``expression``／``jargon``); the response
+        always distinguishes "nothing learned yet" from "learning is not
+        running", because those need different actions from the user.
+        """
+        refused = _guard(request)
+        if refused is not None:
+            return refused
+        return _learning_service().overview(kind=kind, status=status, query=query)
+
+    @router.get("/learning/{item_id}/sources")
+    async def learning_sources(request: Request, item_id: str):
+        """Where a learned item came from."""
+        refused = _guard(request)
+        if refused is not None:
+            return refused
+        return _learning_service().sources(item_id)
+
+    @router.post("/learning/edit")
+    async def learning_edit(request: Request, payload: LearningEditRequest = Body(...)):
+        """Apply a manual edit; it takes priority over later automatic results."""
+        refused = _guard(request)
+        if refused is not None:
+            return refused
+        result = _learning_service().edit(
+            item_id=payload.item_id,
+            content=payload.content,
+            meaning=payload.meaning,
+            scenario=payload.scenario,
+            expected_revision=payload.expected_revision,
+        )
+        return _respond(result)
+
+    @router.post("/learning/toggle")
+    async def learning_toggle(
+        request: Request, payload: LearningActionRequest = Body(...)
+    ):
+        """Enable or disable one item.
+
+        ``enabled`` is required: a missing value would have to be guessed, and a
+        guess here silently enables something the user asked to switch off.
+        """
+        refused = _guard(request)
+        if refused is not None:
+            return refused
+        if payload.enabled is None:
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "ok": False,
+                    "error": "缺少 enabled 字段：启用或禁用必须明确指定。",
+                    "conflict": False,
+                    "item_id": payload.item_id,
+                    "status": "",
+                },
+            )
+        result = _learning_service().set_enabled(
+            item_id=payload.item_id, enabled=payload.enabled
+        )
+        return _respond(result)
+
+    @router.post("/learning/revoke")
+    async def learning_revoke(
+        request: Request, payload: LearningActionRequest = Body(...)
+    ):
+        """Revoke one item.
+
+        A revoked item stops being used and cannot be re-learned from the same
+        evidence. This is the operation the requirements describe as 撤销学习.
+        """
+        refused = _guard(request)
+        if refused is not None:
+            return refused
+        result = _learning_service().revoke(item_id=payload.item_id)
+        return _respond(result)
+
+    @router.post("/learning/meanings")
+    async def learning_meanings(
+        request: Request, payload: LearningMeaningRequest = Body(...)
+    ):
+        """Settle an ambiguous word's meanings.
+
+        Until this is answered the word is not injected at all, because a model
+        guessing at an unsettled meaning is how a wrong sense becomes permanent.
+        """
+        refused = _guard(request)
+        if refused is not None:
+            return refused
+        result = _learning_service().resolve_ambiguity(
+            item_id=payload.item_id,
+            meanings=[entry.model_dump() for entry in payload.meanings],
         )
         return _respond(result)
 

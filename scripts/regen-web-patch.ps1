@@ -29,7 +29,7 @@ $patchDir = Join-Path $RepoRoot 'docs\patches\web'
 $pinned = 'd176e7df2366952e3bacbf12cf9a8b18a4315932'
 
 #: Patch order and the file each one is generated against.
-$series = @('0001-aemeath-web-client.patch', '0002-aemeath-management-ui.patch', '0003-aemeath-desktop-tray-subtitle.patch')
+$series = @('0001-aemeath-web-client.patch', '0002-aemeath-management-ui.patch', '0003-aemeath-desktop-tray-subtitle.patch', '0004-aemeath-learning-pages.patch')
 
 $target = $series | Where-Object { $_ -like "$Patch*" } | Select-Object -First 1
 if (-not $target) { throw "Unknown patch: $Patch (expected one of $($series -join ', '))" }

@@ -206,6 +206,30 @@ def main() -> int:
     status, backups = call("GET", "/memory/backups")
     check("backup listing reachable", status == 200, f"HTTP {status}")
 
+    # -- learning (V2-T04) ----------------------------------------------
+    status, learn_overview = call("GET", "/learning/overview?kind=expression")
+    check("learning expression overview reachable", status == 200, f"HTTP {status}")
+    check(
+        "learning overview distinguishes available from ok",
+        "available" in learn_overview and "ok" in learn_overview,
+        f"ok={learn_overview.get('ok')} available={learn_overview.get('available')}",
+    )
+    check(
+        "learning overview carries counts and items",
+        "counts" in learn_overview and "items" in learn_overview,
+        f"total={learn_overview.get('counts', {}).get('total', 0)}",
+    )
+
+    status, jargon_overview = call("GET", "/learning/overview?kind=jargon")
+    check("learning jargon overview reachable", status == 200, f"HTTP {status}")
+
+    status, toggle_missing = call("POST", "/learning/toggle", {"item_id": "none"})
+    check(
+        "learning toggle requires explicit enabled value (HTTP 422)",
+        status == 422,
+        f"HTTP {status}",
+    )
+
     # -- secrets never returned ----------------------------------------
     # The key is read from the environment rather than written here: a probe
     # that hard-codes a key-shaped literal is itself the kind of thing a secret

@@ -121,6 +121,25 @@ class MemoryConfig:
 
 
 @dataclass(frozen=True)
+class LearningConfig:
+    """Sizing and pacing for expression and jargon learning (V2-T04).
+
+    Learning is *off* by default. It sends conversation text to a model, which
+    is a visible behaviour change rather than a background detail, so it only
+    runs once the user has both configured a provider and switched it on.
+    """
+
+    enabled: bool = False
+    #: How often the background worker drains the learning queue.
+    interval_seconds: float = 30.0
+    #: Maximum enabled entries of each kind injected into one prompt. A cap
+    #: exists because the reference block is a *style hint*, not a knowledge
+    #: base: dumping every learned phrase into every prompt would crowd out the
+    #: persona and the retrieved memories.
+    max_prompt_items: int = 8
+
+
+@dataclass(frozen=True)
 class ProactiveConfig:
     """Rate limits deciding whether Aemeath is *allowed* to speak up.
 
@@ -173,6 +192,10 @@ class ProviderSet:
     embedding: ProviderConfig = field(default_factory=ProviderConfig)
     extraction: ProviderConfig = field(default_factory=ProviderConfig)
     vision: ProviderConfig = field(default_factory=ProviderConfig)
+    #: The expression / jargon learning model. Kept separate from extraction so
+    #: the user can point learning at a different model (or switch it off)
+    #: without changing how memories are written.
+    learning: ProviderConfig = field(default_factory=ProviderConfig)
     #: The conversation model. Mirrors the upstream ``llm_configs`` entry the
     #: active agent uses, so the connectivity probe exercises the same endpoint
     #: conversations will.
@@ -186,6 +209,7 @@ class AemeathConfig:
     data_dir: Path = DEFAULT_DATA_DIR
     log_dir: Path = DEFAULT_LOG_DIR
     memory: MemoryConfig = field(default_factory=MemoryConfig)
+    learning: LearningConfig = field(default_factory=LearningConfig)
     proactive: ProactiveConfig = field(default_factory=ProactiveConfig)
     screen: ScreenConfig = field(default_factory=ScreenConfig)
     speech: SpeechConfig = field(default_factory=SpeechConfig)
@@ -415,6 +439,7 @@ def load_config(config_path: Optional[Path] = None) -> AemeathConfig:
         raw = (parsed.get("character_config") or {}).get("aemeath_config") or {}
 
     memory_raw = raw.get("memory") or {}
+    learning_raw = raw.get("learning") or {}
     proactive_raw = raw.get("proactive") or {}
     screen_raw = raw.get("screen") or {}
     providers_raw = raw.get("providers") or {}
@@ -432,6 +457,7 @@ def load_config(config_path: Optional[Path] = None) -> AemeathConfig:
     asr_backend, tts_backend = _upstream_speech_backends(upstream_parsed, str(path))
 
     defaults = MemoryConfig()
+    learning_defaults = LearningConfig()
     proactive_defaults = ProactiveConfig()
     screen_defaults = ScreenConfig()
 
@@ -455,6 +481,22 @@ def load_config(config_path: Optional[Path] = None) -> AemeathConfig:
             extraction_interval_seconds=_positive_float(
                 memory_raw.get("extraction_interval_seconds"),
                 defaults.extraction_interval_seconds,
+            ),
+        ),
+        learning=LearningConfig(
+            # Learning is opt-in. ``enabled`` defaults to false even when a
+            # provider block exists, so configuring a model cannot silently
+            # start sending conversation text to it.
+            enabled=bool(
+                learning_raw.get("enabled", learning_defaults.enabled)
+            ),
+            interval_seconds=_positive_float(
+                learning_raw.get("interval_seconds"),
+                learning_defaults.interval_seconds,
+            ),
+            max_prompt_items=_positive_int(
+                learning_raw.get("max_prompt_items"),
+                learning_defaults.max_prompt_items,
             ),
         ),
         proactive=ProactiveConfig(
@@ -509,6 +551,9 @@ def load_config(config_path: Optional[Path] = None) -> AemeathConfig:
             vision=_provider(
                 providers_raw.get("vision"), "AEMEATH_VISION_API_KEY"
             ),
+            learning=_provider(
+                providers_raw.get("learning"), "AEMEATH_LEARNING_API_KEY"
+            ),
             conversation=_provider(conversation_raw, "AEMEATH_LLM_API_KEY"),
         ),
         screen_capture_enabled=bool(raw.get("screen_capture_enabled", True)),
@@ -536,6 +581,7 @@ __all__ = [
     "CONFIG_PATH_ENV",
     "ProviderConfig",
     "MemoryConfig",
+    "LearningConfig",
     "ProactiveConfig",
     "ScreenConfig",
     "ProviderSet",

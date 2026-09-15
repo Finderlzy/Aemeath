@@ -41,7 +41,10 @@ PAGES = (
     ("人设", "persona"),
     ("声音", "voice"),
     ("记忆", "memory"),
+    ("表达学习", "expression"),
+    ("黑话词典", "jargon"),
     ("Live2D", "live2d"),
+    ("桌面与字幕", "desktop"),
 )
 
 

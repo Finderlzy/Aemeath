@@ -23,6 +23,7 @@ from fastapi.responses import JSONResponse
 from loguru import logger
 
 from .schema import (
+    DesktopSettingsRequest,
     Live2DSaveRequest,
     MemoryCorrectRequest,
     MemoryForgetRequest,
@@ -393,6 +394,49 @@ def install_management_routes(app, config_path=None) -> None:
             scale=payload.scale,
             x_offset=payload.x_offset,
             y_offset=payload.y_offset,
+            expected_revision=payload.expected_revision,
+        )
+        return _respond(result)
+
+    # ------------------------------------------------------------------
+    # Desktop and subtitle (V2-T03)
+    # ------------------------------------------------------------------
+
+    def _desktop_service():
+        """Build the desktop settings service on the authoritative config."""
+        from .desktop import DesktopSettingsService
+
+        return DesktopSettingsService(config_path)
+
+    @router.get("/desktop/settings")
+    async def desktop_settings(request: Request):
+        """Subtitle sizing and character window geometry.
+
+        Returns usable defaults for anything unset, so a machine that has never
+        configured these still gets a readable character.
+        """
+        refused = _guard(request)
+        if refused is not None:
+            return refused
+        return _desktop_service().overview()
+
+    @router.post("/desktop/settings")
+    async def save_desktop_settings(
+        request: Request, payload: DesktopSettingsRequest = Body(...)
+    ):
+        """Persist the desktop and subtitle settings."""
+        refused = _guard(request)
+        if refused is not None:
+            return refused
+        result = await _desktop_service().save(
+            values={
+                "subtitle_font_size": payload.subtitle_font_size,
+                "subtitle_max_width": payload.subtitle_max_width,
+                "subtitle_dwell_ms": payload.subtitle_dwell_ms,
+                "character_width": payload.character_width,
+                "character_height": payload.character_height,
+                "character_scale": payload.character_scale,
+            },
             expected_revision=payload.expected_revision,
         )
         return _respond(result)

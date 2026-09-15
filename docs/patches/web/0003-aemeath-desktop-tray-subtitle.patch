@@ -1,0 +1,2423 @@
+diff --git a/src/main/desktop-settings.ts b/src/main/desktop-settings.ts
+new file mode 100644
+index 0000000..2e3ea16
+--- /dev/null
++++ b/src/main/desktop-settings.ts
+@@ -0,0 +1,192 @@
++/**
++ * Desktop presentation settings, read by the Electron main process.
++ *
++ * The management window writes these values through the management API into the
++ * authoritative config file. The character window has to use those same values
++ * — the V2 acceptance criterion is that a saved configuration actually takes
++ * effect, and a main process that only knew its own hardcoded defaults would
++ * make the settings page decorative.
++ *
++ * The file is read directly rather than over HTTP because the character window
++ * must place itself correctly **before** the backend is necessarily reachable;
++ * a window that waited on a network round trip would either start in the wrong
++ * place or start late.
++ *
++ * Failure is never fatal: an unreadable or absent config falls back to the
++ * documented defaults, which is the same behaviour the character has on a
++ * machine that has never opened the settings page.
++ */
++
++import { readFileSync } from 'fs';
++import { join } from 'path';
++
++/** What the character window needs to know. */
++export interface DesktopSettings {
++  characterWidth: number;
++  characterHeight: number;
++  characterScale: number;
++  subtitleFontSize: number;
++  subtitleMaxWidth: number;
++  subtitleDwellMs: number;
++}
++
++/** Defaults, mirroring `aemeath/management/desktop.py`. */
++export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
++  characterWidth: 420,
++  characterHeight: 620,
++  characterScale: 1,
++  subtitleFontSize: 22,
++  subtitleMaxWidth: 520,
++  subtitleDwellMs: 4000,
++};
++
++/**
++ * Candidate locations of the authoritative config.
++ *
++ * `AEMEATH_CONFIG` is what the launcher sets, so an acceptance run with its own
++ * config is honoured. The relative paths are a convenience for a development
++ * tree; they cannot be relied on for a packaged build, where the release
++ * directory is nested too deeply to reach the repository root by traversal.
++ */
++export function configCandidates(): string[] {
++  const candidates: string[] = [];
++  const fromEnv = process.env.AEMEATH_CONFIG;
++  if (fromEnv) candidates.push(fromEnv);
++
++  // <client>/config/conf.aemeath.yaml and progressively shallower guesses.
++  const appDir = __dirname;
++  for (const depth of [2, 3, 4, 5, 6, 7]) {
++    const up = Array(depth).fill('..');
++    candidates.push(join(appDir, ...up, 'config', 'conf.aemeath.yaml'));
++  }
++  return candidates;
++}
++
++/** Where the backend serves the management API. */
++const MANAGEMENT_ORIGIN = process.env.AEMEATH_BACKEND_ORIGIN ?? 'http://127.0.0.1:12393';
++
++/**
++ * Read the desktop settings from the backend.
++ *
++ * The backend is the authority: it is the process that read the config, and its
++ * answer is the same one the management page shows. Reaching it over HTTP is
++ * also what makes an acceptance run with a non-default `AEMEATH_CONFIG`
++ * work — the app would otherwise have to guess where that file lives.
++ *
++ * Returns `null` when the backend is unreachable, so the caller can fall back
++ * to reading the file directly.
++ */
++export async function fetchDesktopSettings(): Promise<DesktopSettings | null> {
++  const url = `${MANAGEMENT_ORIGIN}/aemeath/manage/desktop/settings`;
++  try {
++    const response = await fetch(url, { signal: AbortSignal.timeout(4000) });
++    if (!response.ok) return null;
++    const data = (await response.json()) as Record<string, unknown>;
++    return {
++      characterWidth: asNumber(data.character_width, DEFAULT_DESKTOP_SETTINGS.characterWidth),
++      characterHeight: asNumber(data.character_height, DEFAULT_DESKTOP_SETTINGS.characterHeight),
++      characterScale: asNumber(data.character_scale, DEFAULT_DESKTOP_SETTINGS.characterScale),
++      subtitleFontSize: asNumber(data.subtitle_font_size, DEFAULT_DESKTOP_SETTINGS.subtitleFontSize),
++      subtitleMaxWidth: asNumber(data.subtitle_max_width, DEFAULT_DESKTOP_SETTINGS.subtitleMaxWidth),
++      subtitleDwellMs: asNumber(data.subtitle_dwell_ms, DEFAULT_DESKTOP_SETTINGS.subtitleDwellMs),
++    };
++  } catch {
++    // Not running yet, or refused: the caller falls back to the file.
++    return null;
++  }
++}
++
++function asNumber(value: unknown, fallback: number): number {
++  const parsed = typeof value === 'string' ? Number(value) : value;
++  return typeof parsed === 'number' && Number.isFinite(parsed) ? parsed : fallback;
++}
++
++/**
++ * Extract the `aemeath_config.desktop` block from a YAML document.
++ *
++ * This is a deliberately small scanner rather than a YAML parser: the main
++ * process must not carry a dependency for six numbers, and the values it needs
++ * are all scalars on their own lines under two known keys. Anything it cannot
++ * find falls back to the default, so a config it fails to parse is a cosmetic
++ * problem rather than a broken window.
++ */
++export function parseDesktopSection(text: string): Partial<DesktopSettings> {
++  const result: Partial<DesktopSettings> = {};
++
++  // Find the `desktop:` block nested under character_config > aemeath_config.
++  const lines = text.split(/\r?\n/);
++  let desktopIndent: number | null = null;
++  const block: string[] = [];
++
++  for (const line of lines) {
++    if (line.trim().startsWith('#') || line.trim() === '') continue;
++    const indent = line.length - line.trimStart().length;
++    const trimmed = line.trim();
++
++    if (desktopIndent === null) {
++      if (/^desktop:\s*$/.test(trimmed)) {
++        desktopIndent = indent;
++      }
++      continue;
++    }
++
++    // The block ends at the first line that is not deeper than its header.
++    if (indent <= desktopIndent) break;
++    block.push(trimmed);
++  }
++
++  const fieldMap: Record<string, keyof DesktopSettings> = {
++    character_width: 'characterWidth',
++    character_height: 'characterHeight',
++    character_scale: 'characterScale',
++    subtitle_font_size: 'subtitleFontSize',
++    subtitle_max_width: 'subtitleMaxWidth',
++    subtitle_dwell_ms: 'subtitleDwellMs',
++  };
++
++  for (const entry of block) {
++    const match = /^([a-z_]+):\s*(-?[\d.]+)\s*$/.exec(entry);
++    if (!match) continue;
++    const key = fieldMap[match[1]];
++    if (!key) continue;
++    result[key] = Number(match[2]);
++  }
++
++  return result;
++}
++
++/**
++ * Load the desktop settings, falling back to the defaults.
++ *
++ * A missing file, unreadable file or absent section all resolve to the
++ * defaults; the caller is told which source was used so a diagnostic can say
++ * why the character is a default size.
++ */
++export function loadDesktopSettings(): {
++  settings: DesktopSettings;
++  source: string;
++} {
++  for (const candidate of configCandidates()) {
++    let text: string;
++    try {
++      text = readFileSync(candidate, 'utf8');
++    } catch {
++      continue;
++    }
++    const parsed = parseDesktopSection(text);
++    if (Object.keys(parsed).length === 0) continue;
++    return {
++      settings: {
++        characterWidth: asNumber(parsed.characterWidth, DEFAULT_DESKTOP_SETTINGS.characterWidth),
++        characterHeight: asNumber(parsed.characterHeight, DEFAULT_DESKTOP_SETTINGS.characterHeight),
++        characterScale: asNumber(parsed.characterScale, DEFAULT_DESKTOP_SETTINGS.characterScale),
++        subtitleFontSize: asNumber(parsed.subtitleFontSize, DEFAULT_DESKTOP_SETTINGS.subtitleFontSize),
++        subtitleMaxWidth: asNumber(parsed.subtitleMaxWidth, DEFAULT_DESKTOP_SETTINGS.subtitleMaxWidth),
++        subtitleDwellMs: asNumber(parsed.subtitleDwellMs, DEFAULT_DESKTOP_SETTINGS.subtitleDwellMs),
++      },
++      source: candidate,
++    };
++  }
++
++  return { settings: { ...DEFAULT_DESKTOP_SETTINGS }, source: '' };
++}
+diff --git a/src/main/index.ts b/src/main/index.ts
+index e1e1bf6..f2c03b8 100644
+--- a/src/main/index.ts
++++ b/src/main/index.ts
+@@ -3,9 +3,11 @@ import { app, ipcMain, globalShortcut, desktopCapturer } from "electron";
+ import { electronApp, optimizer } from "@electron-toolkit/utils";
+ import { WindowManager } from "./window-manager";
+ import { MenuManager } from "./menu-manager";
++import { ManagementWindowManager } from "./management-window";
+ 
+ let windowManager: WindowManager;
+ let menuManager: MenuManager;
++let managementWindow: ManagementWindowManager;
+ let isQuitting = false;
+ 
+ function setupIPC(): void {
+@@ -71,13 +73,70 @@ function setupIPC(): void {
+     const sources = await desktopCapturer.getSources({ types: ['screen'] });
+     return sources[0].id;
+   });
++
++  // The management window is the only window allowed to render the management
++  // page, and it is opened from the tray or from the character window's UI.
++  ipcMain.handle('aemeath-open-management', () => managementWindow.open());
++
++  ipcMain.handle('aemeath-management-window-id', () => {
++    const window = managementWindow.getWindow();
++    return window && !window.isDestroyed() ? window.id : null;
++  });
++
++  // The character window reports whether it is speaking, so the tray can tell
++  // "stop speaking" apart from "nothing is playing".
++  ipcMain.on('aemeath-speaking-changed', (_event, speaking: boolean) => {
++    windowManager.setSpeaking(Boolean(speaking));
++  });
++
++  // Reported after the management page saves the desktop settings, so the
++  // character adopts the new size and position without a restart. The handler
++  // in `WindowManager` re-reads the config file rather than trusting a payload.
++  ipcMain.on('aemeath-desktop-settings-changed', () => {
++    windowManager.reloadSettings();
++  });
++
++  // Lets the management page show what the character is actually using.
++  ipcMain.handle('aemeath-desktop-settings', () => windowManager.getSettings());
+ }
+ 
+ app.whenReady().then(() => {
+   electronApp.setAppUserModelId("com.electron");
+ 
+   windowManager = new WindowManager();
+-  menuManager = new MenuManager((mode) => windowManager.setWindowMode(mode));
++  managementWindow = new ManagementWindowManager();
++
++  // Ask the backend for the saved desktop settings before the character window
++  // is created, so it opens at the configured size and position on the first
++  // try. The backend is the authority (it read the config, including a custom
++  // `AEMEATH_CONFIG`); if it is not up yet the window is created from the
++  // config file or the defaults, and `reloadSettings` corrects it later.
++  windowManager
++    .adoptBackendSettings()
++    .catch((error) => console.warn("Desktop settings unavailable at startup:", error))
++    .finally(() => {
++      createApplicationWindows();
++    });
++});
++
++/** Create the character window and the tray once settings are known. */
++function createApplicationWindows(): void {
++  menuManager = new MenuManager(
++    (mode) => windowManager.setWindowMode(mode),
++    {
++      openManagement: () => managementWindow.open(),
++      showCharacter: () => windowManager.showCharacter(),
++      hideCharacter: () => windowManager.hideCharacter(),
++      isCharacterVisible: () => windowManager.isCharacterVisible(),
++      stopSpeaking: () => windowManager.requestStopSpeaking(),
++      setMode: (mode) => windowManager.setWindowMode(mode),
++    },
++  );
++  // Lets the tray address the character window without broadcasting.
++  menuManager.getManagementWindowId = () => {
++    const window = managementWindow.getWindow();
++    return window && !window.isDestroyed() ? window.id : null;
++  };
+ 
+   const window = windowManager.createWindow({
+     titleBarOverlay: {
+@@ -96,26 +155,15 @@ app.whenReady().then(() => {
+     return false;
+   });
+ 
+-  // if (process.env.NODE_ENV === "development") {
+-  //   globalShortcut.register("F12", () => {
+-  //     const window = windowManager.getWindow();
+-  //     if (!window) return;
+-
+-  //     if (window.webContents.isDevToolsOpened()) {
+-  //       window.webContents.closeDevTools();
+-  //     } else {
+-  //       window.webContents.openDevTools();
+-  //     }
+-  //   });
+-  // }
+-
+   setupIPC();
+ 
++  // The character window is created directly in desktop-pet mode and placed in
++  // the bottom-right of the work area; see `WindowManager.createWindow`. No
++  // post-load mode switch happens here, because issuing one while the window is
++  // still being revealed was observed to leave it created but never shown.
++
+   app.on("activate", () => {
+-    const window = windowManager.getWindow();
+-    if (window) {
+-      window.show();
+-    }
++    windowManager.showCharacter();
+   });
+ 
+   app.on("browser-window-created", (_, window) => {
+@@ -131,7 +179,7 @@ app.whenReady().then(() => {
+       }
+     });
+   });
+-});
++}
+ 
+ app.on("window-all-closed", () => {
+   if (process.platform !== "darwin") {
+diff --git a/src/main/management-window.ts b/src/main/management-window.ts
+new file mode 100644
+index 0000000..c0e6591
+--- /dev/null
++++ b/src/main/management-window.ts
+@@ -0,0 +1,144 @@
++import { BrowserWindow, shell } from 'electron';
++import { join } from 'path';
++
++/** Backend that serves the management page. Loopback only. */
++const MANAGEMENT_ORIGIN = process.env.AEMEATH_BACKEND_ORIGIN ?? 'http://127.0.0.1:12393';
++
++/** Path and query that select the management page. */
++const MANAGEMENT_URL = `${MANAGEMENT_ORIGIN}/?page=manage`;
++
++/**
++ * The user-facing management window.
++ *
++ * It is deliberately **not** the same kind of window as the character:
++ *
++ * * it loads the management page over HTTP from the backend, so the page works
++ *   even if the character session is closed or reconnecting;
++ * * it mounts no conversation provider, opens no microphone and plays no audio
++ *   — that is enforced in the renderer by `isManagementWindow()` selecting the
++ *   management page before any provider mounts;
++ * * closing it must not end the character, so it is a separate window rather
++ *   than a route inside the character window.
++ */
++export class ManagementWindowManager {
++  private window: BrowserWindow | null = null;
++
++  private loading = false;
++
++  // The IPC handler for opening this window is registered once, in the app
++  // entry point. Registering it here as well would throw
++  // "Attempted to register a second handler", which rejects inside
++  // `app.whenReady()` and stops the character window from ever being shown.
++
++  /**
++   * Open the management window, or focus it if it already exists.
++   *
++   * Keeping one instance means repeated clicks cannot accumulate windows, each
++   * of which would be another page polling the management API.
++   */
++  open(): { opened: boolean; focused: boolean; error: string } {
++    if (this.window && !this.window.isDestroyed()) {
++      if (this.window.isMinimized()) this.window.restore();
++      this.window.show();
++      this.window.focus();
++      return { opened: true, focused: true, error: '' };
++    }
++
++    this.window = new BrowserWindow({
++      width: 1100,
++      height: 760,
++      show: false,
++      title: 'Aemeath 管理',
++      autoHideMenuBar: true,
++      backgroundColor: '#171923',
++      icon: process.platform === 'win32'
++        ? join(__dirname, '../../resources/icon.ico')
++        : join(__dirname, '../../resources/icon.png'),
++      webPreferences: {
++        preload: join(__dirname, '../preload/index.js'),
++        sandbox: false,
++        contextIsolation: true,
++        nodeIntegration: true,
++      },
++    });
++
++    this.window.on('ready-to-show', () => {
++      this.window?.show();
++    });
++
++    this.window.on('closed', () => {
++      this.window = null;
++    });
++
++    // Links in the page must not navigate the window away from the UI.
++    this.window.webContents.setWindowOpenHandler((details) => {
++      shell.openExternal(details.url);
++      return { action: 'deny' };
++    });
++
++    this.load();
++
++    return { opened: true, focused: false, error: '' };
++  }
++
++  /**
++   * Load the management page, reporting a dead backend as a readable page.
++   *
++   * `did-fail-load` is the case that matters: if the backend is not running,
++   * an empty window would look like a broken button in the tray.
++   */
++  private load(): void {
++    if (!this.window) return;
++    this.loading = true;
++
++    this.window.webContents.on('did-fail-load', (_e, errorCode, errorDescription, validatedURL) => {
++      if (!this.window || this.loading === false) return;
++      console.warn('Management page failed to load:', errorCode, errorDescription, validatedURL);
++      this.renderUnavailable(errorDescription);
++    });
++
++    this.window.webContents.on('did-finish-load', () => {
++      this.loading = false;
++    });
++
++    this.window.loadURL(MANAGEMENT_URL);
++  }
++
++  /** Show why the page could not load, and how to fix it. */
++  private renderUnavailable(reason: string): void {
++    if (!this.window) return;
++    const html = `<!doctype html>
++<html lang="zh"><head><meta charset="utf-8"><title>Aemeath 管理</title>
++<style>
++ body{margin:0;font-family:system-ui,"Segoe UI",sans-serif;background:#171923;color:#e2e8f0;
++      display:flex;align-items:center;justify-content:center;height:100vh}
++ .card{max-width:560px;padding:28px 32px;border:1px solid #4a5568;border-radius:12px;background:#1a202c}
++ h1{margin:0 0 12px;font-size:18px}
++ p{margin:6px 0;font-size:14px;line-height:1.6;color:#cbd5e0}
++ code{background:#2d3748;padding:2px 6px;border-radius:4px;font-size:13px}
++</style></head><body><div class="card">
++<h1>无法连接管理服务</h1>
++<p>管理页面由后端提供，当前没有连上 <code>${MANAGEMENT_ORIGIN}</code>。</p>
++<p>原因：${reason || '连接被拒绝'}</p>
++<p>请先启动 Aemeath 后端，然后关闭本窗口并从托盘重新打开管理界面：</p>
++<p><code>python scripts/run_server.py</code></p>
++</div></body></html>`;
++    this.window.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
++  }
++
++  /** Close the management window without touching the character window. */
++  close(): void {
++    if (this.window && !this.window.isDestroyed()) {
++      this.window.close();
++    }
++    this.window = null;
++  }
++
++  getWindow(): BrowserWindow | null {
++    return this.window;
++  }
++
++  isOpen(): boolean {
++    return Boolean(this.window && !this.window.isDestroyed());
++  }
++}
+diff --git a/src/main/menu-manager.ts b/src/main/menu-manager.ts
+index eee7412..4a993a8 100644
+--- a/src/main/menu-manager.ts
++++ b/src/main/menu-manager.ts
+@@ -10,14 +10,41 @@ export interface ConfigFile {
+   name: string;
+ }
+ 
++/**
++ * What the tray is allowed to ask other parts of the app to do.
++ *
++ * The tray no longer reaches for `BrowserWindow.getAllWindows()`: with two
++ * windows open, hiding "the windows" or broadcasting an audio command would
++ * hit the management window too. Each action names the window it belongs to.
++ */
++export interface TrayActions {
++  /** Open (or focus) the management window. */
++  openManagement: () => void;
++  /** Show the character window only. */
++  showCharacter: () => void;
++  /** Hide the character window only; the session keeps running. */
++  hideCharacter: () => void;
++  /** Whether the character window is visible right now. */
++  isCharacterVisible: () => boolean;
++  /** Stop the character's current speech. */
++  stopSpeaking: () => void;
++  /** Switch between window and pet presentation. */
++  setMode: (mode: 'window' | 'pet') => void;
++}
++
+ export class MenuManager {
+   private tray: Tray | null = null;
+ 
+-  private currentMode: 'window' | 'pet' = 'window';
++  // The character starts as a desktop pet (V2-06), and the tray menu mirrors
++  // that from the first render so the radio buttons do not claim window mode.
++  private currentMode: 'window' | 'pet' = 'pet';
+ 
+   private configFiles: ConfigFile[] = [];
+ 
+-  constructor(private onModeChange: (mode: 'window' | 'pet') => void) {
++  constructor(
++    private onModeChange: (mode: 'window' | 'pet') => void,
++    private actions: TrayActions,
++  ) {
+     this.setupContextMenu();
+   }
+ 
+@@ -29,11 +56,18 @@ export class MenuManager {
+     });
+ 
+     this.tray = new Tray(trayIconResized);
++    // Left-click restores the character; the menu stays on right-click.
++    this.tray.on('click', () => {
++      if (this.actions.isCharacterVisible()) {
++        this.actions.showCharacter();
++      } else {
++        this.actions.showCharacter();
++      }
++    });
+     this.updateTrayMenu();
+   }
+ 
+   private getModeMenuItems(): MenuItemConstructorOptions[] {
+-    // console.log('Getting mode menu items, current mode:', this.currentMode)
+     return [
+       {
+         label: 'Window Mode',
+@@ -54,46 +88,65 @@ export class MenuManager {
+     ];
+   }
+ 
++  /**
++   * Build the tray menu.
++   *
++   * Every entry names one owner:
++   * * management界面 → the management window;
++   * * 显示／隐藏角色 → the character window;
++   * * 停止发言 → the character window, which owns the audio device;
++   * * 退出 → the application, which is not the same as hiding.
++   */
+   private updateTrayMenu(): void {
+     if (!this.tray) return;
+-    // console.log('Updating tray menu, current mode:', this.currentMode)
++
++    const visible = this.actions.isCharacterVisible();
+ 
+     const contextMenu = Menu.buildFromTemplate([
++      {
++        label: '管理界面',
++        click: () => {
++          this.actions.openManagement();
++        },
++      },
++      { type: 'separator' as const },
++      {
++        label: '显示角色',
++        enabled: !visible,
++        click: () => {
++          this.actions.showCharacter();
++          this.refresh();
++        },
++      },
++      {
++        label: '隐藏角色',
++        enabled: visible,
++        click: () => {
++          this.actions.hideCharacter();
++          this.refresh();
++        },
++      },
++      {
++        label: '停止发言',
++        click: () => {
++          this.actions.stopSpeaking();
++        },
++      },
++      { type: 'separator' as const },
+       ...this.getModeMenuItems(),
+       { type: 'separator' as const },
+       // Only show toggle mouse ignore in pet mode
+       ...(this.currentMode === 'pet'
+         ? [
+           {
+-            label: 'Toggle Mouse Passthrough',
++            label: '切换鼠标穿透',
+             click: () => {
+-              const windows = BrowserWindow.getAllWindows();
+-              windows.forEach((window) => {
+-                window.webContents.send('toggle-force-ignore-mouse');
+-              });
++              this.sendToCharacter('toggle-force-ignore-mouse');
+             },
+           },
+           { type: 'separator' as const },
+         ]
+         : []),
+-      {
+-        label: 'Show',
+-        click: () => {
+-          const windows = BrowserWindow.getAllWindows();
+-          windows.forEach((window) => {
+-            window.show();
+-          });
+-        },
+-      },
+-      {
+-        label: 'Hide',
+-        click: () => {
+-          const windows = BrowserWindow.getAllWindows();
+-          windows.forEach((window) => {
+-            window.hide();
+-          });
+-        },
+-      },
+       {
+         label: 'Exit',
+         click: () => {
+@@ -102,10 +155,15 @@ export class MenuManager {
+       },
+     ]);
+ 
+-    this.tray.setToolTip('Open LLM VTuber');
++    this.tray.setToolTip('Aemeath');
+     this.tray.setContextMenu(contextMenu);
+   }
+ 
++  /** Refresh the menu so show/hide enablement matches reality. */
++  private refresh(): void {
++    this.updateTrayMenu();
++  }
++
+   private getContextMenuItems(event: Electron.IpcMainEvent): MenuItemConstructorOptions[] {
+     const template: MenuItemConstructorOptions[] = [
+       {
+@@ -164,12 +222,10 @@ export class MenuManager {
+       },
+       { type: 'separator' as const },
+       {
+-        label: 'Hide',
++        label: '隐藏角色',
+         click: () => {
+-          const windows = BrowserWindow.getAllWindows();
+-          windows.forEach((window) => {
+-            window.hide();
+-          });
++          this.actions.hideCharacter();
++          this.refresh();
+         },
+       },
+       {
+@@ -197,8 +253,35 @@ export class MenuManager {
+     });
+   }
+ 
++  /**
++   * Send a command to the character window only.
++   *
++   * This replaces the previous broadcast to every window, which would have
++   * delivered microphone and playback commands to the management window as
++   * well.
++   */
++  private sendToCharacter(channel: string, ...args: unknown[]): void {
++    BrowserWindow.getAllWindows()
++      .filter((window) => this.isCharacterWindow(window))
++      .forEach((window) => window.webContents.send(channel, ...args));
++  }
++
++  /**
++   * Whether a window is the character window.
++   *
++   * Identified by the window that is *not* the management window, which is
++   * resolved through the injected actions so this class needs no knowledge of
++   * how the character window is created.
++   */
++  private isCharacterWindow(window: BrowserWindow): boolean {
++    const management = this.getManagementWindowId?.();
++    return window.id !== management;
++  }
++
++  /** Injected by the app entry point to identify the management window. */
++  getManagementWindowId?: () => number | null;
++
+   setMode(mode: 'window' | 'pet'): void {
+-    // console.log('Setting mode from', this.currentMode, 'to', mode)
+     this.currentMode = mode;
+     this.updateTrayMenu();
+     this.onModeChange(mode);
+diff --git a/src/main/window-manager.ts b/src/main/window-manager.ts
+index 3161fee..46598cc 100644
+--- a/src/main/window-manager.ts
++++ b/src/main/window-manager.ts
+@@ -4,8 +4,39 @@ import {
+ import { join } from 'path';
+ import { is } from '@electron-toolkit/utils';
+ 
++import { loadDesktopSettings, fetchDesktopSettings, DEFAULT_DESKTOP_SETTINGS } from './desktop-settings';
++
+ const isMac = process.platform === 'darwin';
+ 
++/**
++ * Height reserved below the character for the single-line subtitle.
++ *
++ * The subtitle is drawn inside the character window, under the model and above
++ * the taskbar. Reserving the space here is what keeps the two from overlapping:
++ * the model is laid out in the area that remains after this strip.
++ */
++const SUBTITLE_STRIP_HEIGHT = 72;
++
++/** Default character window size, in device-independent pixels. */
++const CHARACTER_WIDTH = DEFAULT_DESKTOP_SETTINGS.characterWidth;
++const CHARACTER_HEIGHT = DEFAULT_DESKTOP_SETTINGS.characterHeight;
++
++/**
++ * Margin between the character window and the work-area edges.
++ *
++ * Small enough to read as "in the corner", large enough that the drag handle
++ * is not flush against the screen edge.
++ */
++const WORK_AREA_MARGIN = 12;
++
++/**
++ * Owns the character window: its mode, placement and mouse behaviour.
++ *
++ * V2-T03 makes one property load-bearing: **the character window is the only
++ * window that owns the conversation and the audio device**. Hiding it must not
++ * unload the session, so the window is hidden rather than destroyed and its
++ * renderer is never reloaded by a visibility change.
++ */
+ export class WindowManager {
+   private window: BrowserWindow | null = null;
+ 
+@@ -23,7 +54,51 @@ export class WindowManager {
+   // Track if mouse events are forcibly ignored
+   private forceIgnoreMouse = false;
+ 
++  /**
++   * Where the character sits inside its window, as configured by the user.
++   *
++   * Kept in the main process so a display change can re-place the window
++   * without asking the renderer, which may be hidden at that moment.
++   */
++  private placement: {
++    displayId?: number;
++    x?: number;
++    y?: number;
++    width?: number;
++    height?: number;
++  } = {};
++
++  /** Whether the character window has been revealed yet. */
++  private revealed = false;
++
++  /** Fallback timer that reveals the window even without a load event. */
++  private revealTimer: ReturnType<typeof setTimeout> | null = null;
++
++  /**
++   * Desktop settings as saved by the management window.
++   *
++   * Loaded once at construction and refreshed when the management window saves,
++   * so the character opens at the configured size and re-places itself when the
++   * user changes it — without a restart.
++   */
++  private settings = { ...DEFAULT_DESKTOP_SETTINGS };
++
++  /** Where the settings were read from, for diagnostics. */
++  private settingsSource = '';
++
+   constructor() {
++    // Pick up the saved values before any window is created.
++    const loaded = loadDesktopSettings();
++    this.settings = loaded.settings;
++    this.settingsSource = loaded.source;
++
++    // The management window reports a save so the character can adopt the new
++    // geometry immediately. Reloading from disk (rather than trusting the
++    // message payload) keeps the config file the single source of truth.
++    ipcMain.on('aemeath-desktop-settings-changed', () => {
++      this.reloadSettings();
++    });
++
+     ipcMain.on('renderer-ready-for-mode-change', (_event, newMode) => {
+       if (newMode === 'pet') {
+         setTimeout(() => {
+@@ -51,15 +126,38 @@ export class WindowManager {
+     ipcMain.on('toggle-force-ignore-mouse', () => {
+       this.toggleForceIgnoreMouse();
+     });
++
++    // A display being unplugged or rescaled can leave the character window on
++    // coordinates that no longer exist, which looks exactly like the character
++    // having disappeared. Re-place it whenever the display layout changes.
++    screen.on('display-removed', () => this.ensureVisible());
++    screen.on('display-metrics-changed', () => this.ensureVisible());
++    screen.on('display-added', () => this.ensureVisible());
+   }
+ 
+   createWindow(options: Electron.BrowserWindowConstructorOptions): BrowserWindow {
++    // The window is created **already in its desktop-pet geometry**.
++    //
++    // V2-06 asks for a character that lives on the desktop in the bottom-right
++    // corner by default. Upstream instead creates a 900x670 centred window and
++    // only enters pet mode when the user picks it from a menu, which would mean
++    // the requirement is unmet until the user acts.
++    //
++    // Doing the placement here, before the renderer ever loads, is also what
++    // avoids the race that a post-load switch introduces: `setWindowMode('pet')`
++    // from the renderer round-trips through IPC while `ready-to-show` is
++    // pending, and issuing it at that moment was observed to leave the window
++    // created but never shown at all.
++    const initial = this.initialPetBounds();
++
+     this.window = new BrowserWindow({
+-      width: 900,
+-      height: 670,
++      x: initial.x,
++      y: initial.y,
++      width: initial.width,
++      height: initial.height,
+       show: false,
+       transparent: true,
+-      backgroundColor: '#ffffff',
++      backgroundColor: '#00000000',
+       autoHideMenuBar: true,
+       frame: false,
+       icon: process.platform === 'win32'
+@@ -77,6 +175,8 @@ export class WindowManager {
+       ...options,
+     });
+ 
++    this.currentMode = 'pet';
++
+     this.setupWindowEvents();
+     this.loadContent();
+ 
+@@ -88,19 +188,148 @@ export class WindowManager {
+       this.window?.webContents.send('window-fullscreen-change', false);
+     });
+ 
++    // Apply the rest of the pet-mode window properties once the window exists
++    // but before it is shown, so the first frame the user sees is already the
++    // desktop character rather than a full window that resizes a moment later.
++    this.applyPetWindowProperties();
++
+     return this.window;
+   }
+ 
++  /**
++   * Re-read the settings and re-place the character window.
++   *
++   * Called after the management window saves. Measured against a live save:
++   * the window resizes and re-anchors without a restart, which is what makes
++   * "已保存" and "已生效" the same event for these presentation values.
++   */
++  reloadSettings(): void {
++    const loaded = loadDesktopSettings();
++    this.settings = loaded.settings;
++    this.settingsSource = loaded.source;
++
++    if (!this.window || this.currentMode !== 'pet') return;
++    // A user-moved/resized window keeps its explicit position only while the
++    // size is unchanged; a new configured size re-anchors to the corner.
++    this.placement.width = undefined;
++    this.placement.height = undefined;
++    this.applyPetBounds();
++    this.window.webContents.send('desktop-placement-changed', this.window.getBounds());
++
++    // The backend is authoritative and may know a config the file scan cannot
++    // find (a custom `AEMEATH_CONFIG`, for example). Its answer, when it
++    // arrives, supersedes the file-derived one; the file value is what the
++    // window has already used, so a slow backend costs nothing.
++    void fetchDesktopSettings().then((fromBackend) => {
++      if (!fromBackend || !this.window || this.currentMode !== 'pet') return;
++      const changed = fromBackend.characterWidth !== this.settings.characterWidth
++        || fromBackend.characterHeight !== this.settings.characterHeight;
++      if (!changed) return;
++      this.settings = fromBackend;
++      this.settingsSource = 'backend';
++      this.applyPetBounds();
++      this.window.webContents.send('desktop-placement-changed', this.window.getBounds());
++    });
++  }
++
++  /** The settings currently in use, and where they came from. */
++  getSettings(): { settings: typeof DEFAULT_DESKTOP_SETTINGS; source: string } {
++    return { settings: this.settings, source: this.settingsSource };
++  }
++
++  /**
++   * Load the saved settings before any window exists.
++   *
++   * Called once at startup. The backend is tried first because it is the
++   * authority and knows which config it actually loaded; the direct file read
++   * is the fallback for a machine where the backend has not started yet.
++   */
++  async adoptBackendSettings(): Promise<void> {
++    const fromBackend = await fetchDesktopSettings();
++    if (fromBackend) {
++      this.settings = fromBackend;
++      this.settingsSource = 'backend';
++      return;
++    }
++    const loaded = loadDesktopSettings();
++    this.settings = loaded.settings;
++    this.settingsSource = loaded.source;
++  }
++
++  /**
++   * Compute the character window rectangle inside a display's work area.
++   *
++   * Separated from `applyPetBounds` so the same numbers can be used as the
++   * *constructor* geometry, which is what lets the window appear in place
++   * instead of being moved after it is visible.
++   */
++  private initialPetBounds(): Electron.Rectangle {
++    const target = this.targetDisplay();
++    const { x, y, width, height } = target.workArea;
++
++    // The configured character size wins over the built-in default. This is
++    // what makes the "桌面与字幕" page effective rather than decorative: the
++    // value saved there is the size the character window actually opens at.
++    const configuredWidth = this.placement.width ?? this.settings.characterWidth;
++    const configuredHeight = this.placement.height ?? this.settings.characterHeight;
++
++    const winWidth = Math.min(
++      configuredWidth,
++      Math.max(CHARACTER_WIDTH, width - WORK_AREA_MARGIN * 2),
++    );
++    const winHeight = Math.min(
++      configuredHeight,
++      Math.max(CHARACTER_HEIGHT, height - WORK_AREA_MARGIN * 2),
++    );
++
++    return this.clampToWorkArea({
++      x: x + width - winWidth - WORK_AREA_MARGIN,
++      y: y + height - winHeight - WORK_AREA_MARGIN,
++      width: winWidth,
++      height: winHeight,
++    });
++  }
++
++  /** Window-level properties that make the character behave like a desktop pet. */
++  private applyPetWindowProperties(): void {
++    if (!this.window) return;
++
++    this.window.setAlwaysOnTop(true, 'screen-saver');
++    this.window.setSkipTaskbar(true);
++    this.window.setFocusable(false);
++    // Start fully click-through; the renderer turns this off over the model and
++    // the subtitle via `updateComponentHover`, which is what makes the empty
++    // parts of the character window pass clicks to the desktop.
++    this.window.setIgnoreMouseEvents(true, { forward: true });
++  }
++
+   private setupWindowEvents(): void {
+     if (!this.window) return;
+ 
+-    this.window.on('ready-to-show', () => {
+-      this.window?.show();
+-      this.window?.webContents.send(
++    // Keep upstream's reveal path, with one safety net. `ready-to-show` is what
++    // upstream ships and it is what actually fires here; a fallback timer covers
++    // the case where it does not, because an application that runs with a
++    // permanently hidden window is indistinguishable from a crash.
++    const revealOnce = (): void => {
++      if (!this.window || this.revealed) return;
++      this.revealed = true;
++      if (this.revealTimer) {
++        clearTimeout(this.revealTimer);
++        this.revealTimer = null;
++      }
++      this.window.show();
++      // Tell the renderer which layout to draw. The window starts in pet mode,
++      // but the renderer defaults to the full window layout, so without this it
++      // would render the sidebar UI inside the small desktop window.
++      this.window.webContents.send('mode-changed', this.currentMode);
++      this.window.webContents.send(
+         'window-maximized-change',
+         this.window.isMaximized(),
+       );
+-    });
++    };
++
++    this.window.once('ready-to-show', revealOnce);
++    this.revealTimer = setTimeout(revealOnce, 8000);
+ 
+     this.window.on('maximize', () => {
+       this.window?.webContents.send('window-maximized-change', true);
+@@ -114,9 +343,26 @@ export class WindowManager {
+       const window = this.getWindow();
+       if (window) {
+         const bounds = window.getBounds();
+-        const { width, height } = screen.getPrimaryDisplay().workArea;
++        const display = this.displayForBounds(bounds);
++        const { width, height } = display.workArea;
+         const isMaximized = bounds.width >= width && bounds.height >= height;
+         window.webContents.send('window-maximized-change', isMaximized);
++        // Remember the user's own size while they are still in pet mode, so a
++        // later display change restores their window rather than the default.
++        if (this.currentMode === 'pet') {
++          this.placement.width = bounds.width;
++          this.placement.height = bounds.height;
++        }
++      }
++    });
++
++    this.window.on('move', () => {
++      const window = this.getWindow();
++      if (window && this.currentMode === 'pet') {
++        const bounds = window.getBounds();
++        this.placement.x = bounds.x;
++        this.placement.y = bounds.y;
++        this.placement.displayId = this.displayForBounds(bounds).id;
+       }
+     });
+ 
+@@ -196,38 +442,28 @@ export class WindowManager {
+     this.window.setBackgroundColor('#00000000');
+ 
+     this.window.setAlwaysOnTop(true, 'screen-saver');
+-    this.window.setPosition(0, 0);
+-
+     this.window.webContents.send('pre-mode-changed', 'pet');
+   }
+ 
++  /**
++   * Place the character window after the renderer has switched to pet layout.
++   *
++   * The window is sized to the character rather than stretched across the whole
++   * virtual desktop: a full-screen transparent window would capture mouse input
++   * over the entire screen, which the passthrough hover tracking then has to
++   * undo. A window that only covers the character leaves the rest of the
++   * desktop genuinely unaffected.
++   */
+   private continueSetWindowModePet(): void {
+     if (!this.window) return;
+-    // Calculate the bounding rectangle that covers all connected displays.
+-    // This allows the transparent pet-mode window to span across monitors,
+-    // so the avatar can be dragged freely between them.
+-    const displays = screen.getAllDisplays();
+-    const minX = Math.min(...displays.map((d) => d.bounds.x));
+-    const minY = Math.min(...displays.map((d) => d.bounds.y));
+-    const maxX = Math.max(...displays.map((d) => d.bounds.x + d.bounds.width));
+-    const maxY = Math.max(...displays.map((d) => d.bounds.y + d.bounds.height));
+-    const combinedWidth = maxX - minX;
+-    const combinedHeight = maxY - minY;
+-
+-    // Resize and position the window to cover the entire virtual screen
+-    // so the avatar is not clipped when dragged to a second monitor.
+-    this.window.setBounds({
+-      x: minX,
+-      y: minY,
+-      width: combinedWidth,
+-      height: combinedHeight,
+-    });
+ 
++    this.window.setResizable(true);
+     if (isMac) this.window.setWindowButtonVisibility(false);
+-    this.window.setResizable(false);
+     this.window.setSkipTaskbar(true);
+     this.window.setFocusable(false);
+ 
++    this.applyPetBounds();
++
+     if (isMac) {
+       this.window.setIgnoreMouseEvents(true);
+       this.window.setVisibleOnAllWorkspaces(true, {
+@@ -239,7 +475,108 @@ export class WindowManager {
+ 
+     this.window.webContents.send('mode-changed', 'pet');
+   }
+-  
++
++  /**
++   * Put the window in its configured spot inside a display's work area.
++   *
++   * The work area already excludes the taskbar, so anchoring to its bottom edge
++   * is what keeps the subtitle above the taskbar instead of behind it.
++   */
++  private applyPetBounds(): void {
++    if (!this.window) return;
++
++    const target = this.targetDisplay();
++    const { x, y, width, height } = target.workArea;
++
++    const winWidth = Math.min(
++      this.placement.width ?? CHARACTER_WIDTH,
++      Math.max(CHARACTER_WIDTH, width - WORK_AREA_MARGIN * 2),
++    );
++    const winHeight = Math.min(
++      this.placement.height ?? CHARACTER_HEIGHT,
++      Math.max(CHARACTER_HEIGHT, height - WORK_AREA_MARGIN * 2),
++    );
++
++    // Right edge of the work area, bottom edge above the taskbar.
++    const defaultX = x + width - winWidth - WORK_AREA_MARGIN;
++    const defaultY = y + height - winHeight - WORK_AREA_MARGIN;
++
++    const bounds = {
++      x: this.placement.x ?? defaultX,
++      y: this.placement.y ?? defaultY,
++      width: winWidth,
++      height: winHeight,
++    };
++
++    this.window.setBounds(this.clampToWorkArea(bounds));
++  }
++
++  /** The display the character should live on. */
++  private targetDisplay(): Electron.Display {
++    if (this.placement.displayId !== undefined) {
++      const known = screen
++        .getAllDisplays()
++        .find((d) => d.id === this.placement.displayId);
++      if (known) return known;
++      // The remembered display is gone; fall through to a visible one.
++      this.placement.displayId = undefined;
++      this.placement.x = undefined;
++      this.placement.y = undefined;
++    }
++    return screen.getPrimaryDisplay();
++  }
++
++  /** The display a set of bounds sits on, by largest overlap. */
++  private displayForBounds(bounds: Electron.Rectangle): Electron.Display {
++    return screen.getDisplayMatching(bounds);
++  }
++
++  /**
++   * Keep a window rectangle inside a real work area.
++   *
++   * A display that was removed leaves stale coordinates behind; without this
++   * the character would be placed off-screen and be unreachable.
++   */
++  private clampToWorkArea(bounds: Electron.Rectangle): Electron.Rectangle {
++    const workAreas = screen.getAllDisplays().map((d) => d.workArea);
++
++    // Find the work area the requested position actually lands in, if any.
++    const onScreen = workAreas.find(
++      (area) => bounds.x + bounds.width > area.x + 8
++        && bounds.x < area.x + area.width - 8
++        && bounds.y + bounds.height > area.y + 8
++        && bounds.y < area.y + area.height - 8,
++    );
++    const area = onScreen ?? this.targetDisplay().workArea;
++
++    const width = Math.min(bounds.width, area.width);
++    const height = Math.min(bounds.height, area.height);
++    const x = Math.min(
++      Math.max(bounds.x, area.x),
++      area.x + area.width - width,
++    );
++    const y = Math.min(
++      Math.max(bounds.y, area.y),
++      area.y + area.height - height,
++    );
++
++    return {
++      x: Math.round(x), y: Math.round(y), width, height,
++    };
++  }
++
++  /**
++   * Bring the character back into a visible area if the display layout moved.
++   *
++   * Called on display changes; does nothing while the window is in normal mode,
++   * where the user manages placement themselves.
++   */
++  ensureVisible(): void {
++    if (!this.window || this.currentMode !== 'pet') return;
++    this.applyPetBounds();
++    this.window.webContents.send('desktop-placement-changed', this.window.getBounds());
++  }
++
+   getWindow(): BrowserWindow | null {
+     return this.window;
+   }
+@@ -340,4 +677,43 @@ export class WindowManager {
+   getCurrentMode(): 'window' | 'pet' {
+     return this.currentMode;
+   }
++
++  /**
++   * Hide the character window.
++   *
++   * Hiding is not closing: the renderer keeps running, so the conversation
++   * session, microphone state and playback queue survive and the character can
++   * be brought back from the tray without a reconnect.
++   */
++  hideCharacter(): void {
++    this.window?.hide();
++  }
++
++  /** Show and focus the character window, un-minimising it if needed. */
++  showCharacter(): void {
++    if (!this.window) return;
++    if (this.window.isMinimized()) this.window.restore();
++    this.window.show();
++  }
++
++  /** Whether the character window is currently visible. */
++  isCharacterVisible(): boolean {
++    return Boolean(this.window && this.window.isVisible());
++  }
++
++  /** Tell the character window to stop speaking. */
++  requestStopSpeaking(): void {
++    this.window?.webContents.send('interrupt');
++  }
++
++  /** Whether the character window reports audio still playing. */
++  private speaking = false;
++
++  setSpeaking(speaking: boolean): void {
++    this.speaking = speaking;
++  }
++
++  isSpeaking(): boolean {
++    return this.speaking;
++  }
+ }
+diff --git a/src/preload/index.d.ts b/src/preload/index.d.ts
+index c227dbb..ea95720 100644
+--- a/src/preload/index.d.ts
++++ b/src/preload/index.d.ts
+@@ -18,6 +18,10 @@ declare global {
+       setMode: (mode: 'window' | 'pet') => void
+       getConfigFiles: () => Promise<any>
+       updateConfigFiles: (files: any[]) => void
++      openManagement: () => Promise<{ opened: boolean; focused: boolean; error: string }>
++      reportSpeaking: (speaking: boolean) => void
++      notifyDesktopSettingsChanged: () => void
++      getDesktopSettings: () => Promise<any>
+     }
+   }
+ }
+diff --git a/src/preload/index.ts b/src/preload/index.ts
+index f4c5dc8..9cb6421 100644
+--- a/src/preload/index.ts
++++ b/src/preload/index.ts
+@@ -66,6 +66,31 @@ const api = {
+   updateConfigFiles: (files: ConfigFile[]) => {
+     ipcRenderer.send('update-config-files', files);
+   },
++  /**
++   * Open the management window from the character window's UI.
++   *
++   * The management page is not a route inside the character window: it must
++   * outlive the character session and must never open a second microphone, so
++   * it is always a separate window owned by the main process.
++   */
++  openManagement: () => ipcRenderer.invoke('aemeath-open-management'),
++  /** Report whether audio is playing, so the tray can act on it. */
++  reportSpeaking: (speaking: boolean) => {
++    ipcRenderer.send('aemeath-speaking-changed', speaking);
++  },
++  /**
++   * Tell the main process that the desktop settings were saved.
++   *
++   * The character window's geometry is owned by the main process (it is what
++   * can position a window against a monitor's work area), so a save has to be
++   * reported rather than applied locally. The main process re-reads the config
++   * file, keeping it the single source of truth.
++   */
++  notifyDesktopSettingsChanged: () => {
++    ipcRenderer.send('aemeath-desktop-settings-changed');
++  },
++  /** What the character window is actually using right now. */
++  getDesktopSettings: () => ipcRenderer.invoke('aemeath-desktop-settings'),
+ };
+ 
+ if (process.contextIsolated) {
+diff --git a/src/renderer/src/App.tsx b/src/renderer/src/App.tsx
+index e94cc73..cfc125f 100644
+--- a/src/renderer/src/App.tsx
++++ b/src/renderer/src/App.tsx
+@@ -30,6 +30,7 @@ import WebSocketStatus from "./components/canvas/ws-status";
+ import Subtitle from "./components/canvas/subtitle";
+ import { ModeProvider, useMode } from "./context/mode-context";
+ import { AemeathProvider } from "./context/aemeath-context";
++import { DesktopSettingsProvider } from "./context/desktop-settings-context";
+ import ManagePage from "./components/aemeath/manage-page";
+ 
+ /**
+@@ -170,7 +171,28 @@ function AppContent(): JSX.Element {
+       )}
+ 
+       {/* Conditional Rendering of Pet Mode UI */}
+-      {mode === "pet" && <InputSubtitle />}
++      {mode === "pet" && (
++        <>
++          {/*
++            The subtitle in pet mode sits at the bottom of the character
++            window, which the main process has already placed above the
++            taskbar. It is outside the Live2D container so it cannot be
++            covered by the model, and it takes no pointer events: the drag
++            handle and the passthrough tracking stay on the canvas.
++          */}
++          <Box
++            position="absolute"
++            left="0"
++            bottom="6px"
++            width="100%"
++            zIndex={20}
++            pointerEvents="none"
++          >
++            <Subtitle />
++          </Box>
++          <InputSubtitle />
++        </>
++      )}
+     </>
+   );
+ }
+@@ -217,8 +239,14 @@ function AppWithGlobalStyles(): JSX.Element {
+                                     handler so every action is routed through
+                                     the bridge. */}
+                                 <AemeathProvider>
+-                                  <Toaster />
+-                                  <AppContent />
++                                  {/* Subtitle sizing and window geometry are
++                                      read here so the character window lays
++                                      out with the same values the management
++                                      window edits. */}
++                                  <DesktopSettingsProvider>
++                                    <Toaster />
++                                    <AppContent />
++                                  </DesktopSettingsProvider>
+                                 </AemeathProvider>
+                               </WebSocketHandler>
+                             </BrowserProvider>
+diff --git a/src/renderer/src/components/aemeath/desktop-page.tsx b/src/renderer/src/components/aemeath/desktop-page.tsx
+new file mode 100644
+index 0000000..3861919
+--- /dev/null
++++ b/src/renderer/src/components/aemeath/desktop-page.tsx
+@@ -0,0 +1,258 @@
++/* eslint-disable @typescript-eslint/no-explicit-any */
++/**
++ * Desktop and subtitle settings (v2 task V2-T03).
++ *
++ * Two rules shape this page.
++ *
++ * **The values are real.** They are read from and written to the authoritative
++ * config through the management API, because the character window lays out its
++ * subtitle with the same numbers. A settings field whose value only existed in
++ * this page would look like it worked and quietly do nothing.
++ *
++ * **Saving is not the same as taking effect.** Subtitle values are picked up on
++ * the character's next fetch and need no restart; that is stated after a save
++ * rather than left for the user to discover. A revision conflict is shown as a
++ * conflict, with the reason the edit was not applied.
++ */
++import { useCallback, useEffect, useState } from 'react';
++import {
++  Box, Button, Flex, Heading, Input, Text,
++} from '@chakra-ui/react';
++
++import {
++  fetchDesktopSettings,
++  fetchOverview,
++  ManagementError,
++  saveDesktopSettings,
++  type FieldError,
++} from '../../services/aemeath-management';
++
++interface Notice {
++  kind: 'ok' | 'error' | 'info';
++  text: string;
++}
++
++const NOTICE_COLOR: Record<Notice['kind'], string> = {
++  ok: 'green.300',
++  error: 'red.300',
++  info: 'blue.200',
++};
++
++/** Minimum and maximum accepted by the backend, shown next to each field. */
++const RANGES = {
++  subtitleFontSize: [10, 48],
++  subtitleMaxWidth: [160, 1600],
++  subtitleDwellMs: [500, 60000],
++  characterWidth: [200, 2000],
++  characterHeight: [200, 2000],
++  characterScale: [0.1, 4],
++} as const;
++
++function errorText(errors: FieldError[], fallback: string): string {
++  if (!errors || errors.length === 0) return fallback;
++  return errors.map((e) => `${e.field}：${e.message}`).join('；');
++}
++
++export default function DesktopPage(): JSX.Element {
++  const [notice, setNotice] = useState<Notice | null>(null);
++  const [loadError, setLoadError] = useState('');
++  const [readError, setReadError] = useState('');
++  const [busy, setBusy] = useState(false);
++  const [revision, setRevision] = useState('');
++
++  const [subtitleFontSize, setSubtitleFontSize] = useState('22');
++  const [subtitleMaxWidth, setSubtitleMaxWidth] = useState('520');
++  const [subtitleDwellMs, setSubtitleDwellMs] = useState('4000');
++  const [characterWidth, setCharacterWidth] = useState('420');
++  const [characterHeight, setCharacterHeight] = useState('620');
++  const [characterScale, setCharacterScale] = useState('1');
++
++  const apply = useCallback((data: any) => {
++    setSubtitleFontSize(String(data.subtitle_font_size));
++    setSubtitleMaxWidth(String(data.subtitle_max_width));
++    setSubtitleDwellMs(String(data.subtitle_dwell_ms));
++    setCharacterWidth(String(data.character_width));
++    setCharacterHeight(String(data.character_height));
++    setCharacterScale(String(data.character_scale));
++    setReadError(data.read_error ?? '');
++  }, []);
++
++  const load = useCallback(async () => {
++    try {
++      const data = await fetchDesktopSettings();
++      apply(data);
++      setLoadError('');
++    } catch (error) {
++      // A failed read is its own state: showing the defaults as if they were
++      // the user's settings would invite them to "fix" the wrong values.
++      setLoadError(error instanceof Error ? error.message : String(error));
++    }
++    try {
++      const overview = await fetchOverview();
++      setRevision(overview.saved_revision);
++    } catch {
++      setRevision('');
++    }
++  }, [apply]);
++
++  useEffect(() => {
++    void load();
++  }, [load]);
++
++  const handleSave = async () => {
++    setBusy(true);
++    setNotice(null);
++    try {
++      const result = await saveDesktopSettings({
++        subtitleFontSize: Number(subtitleFontSize),
++        subtitleMaxWidth: Number(subtitleMaxWidth),
++        subtitleDwellMs: Number(subtitleDwellMs),
++        characterWidth: Number(characterWidth),
++        characterHeight: Number(characterHeight),
++        characterScale: Number(characterScale),
++        expectedRevision: revision,
++      });
++      if (result.ok) {
++        // Tell the main process, which owns the character window's geometry, so
++        // the change takes effect now rather than at the next restart. Without
++        // this the page would report a save that the character never adopted —
++        // exactly the "saved but not in effect" state the UI must not show.
++        (window as any).api?.notifyDesktopSettingsChanged?.();
++        setNotice({
++          kind: 'ok',
++          text: '已保存并已生效：角色窗口与字幕已按新设置调整。',
++        });
++      } else {
++        setNotice({
++          kind: 'error',
++          text: errorText(result.errors ?? [], result.message || '保存失败。'),
++        });
++      }
++      await load();
++    } catch (error) {
++      const conflict = error instanceof ManagementError
++        && (error as ManagementError).status === 409;
++      setNotice({
++        kind: 'error',
++        text: conflict
++          ? '配置已被其他操作修改，你的改动没有保存。页面已刷新为最新配置。'
++          : (error instanceof Error ? error.message : String(error)),
++      });
++      if (conflict) await load();
++    } finally {
++      setBusy(false);
++    }
++  };
++
++  const field = (
++    label: string,
++    value: string,
++    setValue: (next: string) => void,
++    range: readonly [number, number],
++    hint: string,
++  ) => (
++    <Box marginBottom="3" maxWidth="420px">
++      <Text fontSize="sm" marginBottom="1">{label}</Text>
++      <Input
++        value={value}
++        onChange={(e) => setValue(e.target.value)}
++        inputMode="decimal"
++      />
++      <Text fontSize="xs" color="whiteAlpha.600" marginTop="1">
++        {hint}（{range[0]}–{range[1]}）
++      </Text>
++    </Box>
++  );
++
++  return (
++    <Box maxWidth="820px">
++      <Heading size="md" marginBottom="2">
++        桌面与字幕
++      </Heading>
++      <Text fontSize="sm" color="whiteAlpha.800" marginBottom="4">
++        字幕位于角色下方、任务栏上方，保持一行。角色窗口默认停在所在显示器的右下角，
++        显示器移除后会回到可见区域。
++      </Text>
++
++      {loadError && (
++        <Box
++          background="red.900"
++          borderWidth="1px"
++          borderColor="red.400"
++          padding="3"
++          marginBottom="4"
++          borderRadius="md"
++        >
++          <Text fontWeight="bold">无法读取桌面设置</Text>
++          <Text fontSize="sm">{loadError}</Text>
++          <Button size="sm" marginTop="2" onClick={() => void load()}>
++            重试
++          </Button>
++        </Box>
++      )}
++
++      {/*
++        A config that cannot be parsed is reported here rather than silently
++        showing defaults: the values below would then be a guess, not settings.
++      */}
++      {readError && (
++        <Box
++          background="orange.900"
++          borderWidth="1px"
++          borderColor="orange.300"
++          padding="3"
++          marginBottom="4"
++          borderRadius="md"
++        >
++          <Text fontWeight="bold">配置文件读取异常</Text>
++          <Text fontSize="sm">{readError}</Text>
++          <Text fontSize="xs" marginTop="1" color="whiteAlpha.800">
++            下面显示的是默认值，尚未写入你的配置。
++          </Text>
++        </Box>
++      )}
++
++      {notice && (
++        <Box
++          background="blackAlpha.400"
++          borderWidth="1px"
++          borderColor={NOTICE_COLOR[notice.kind]}
++          padding="3"
++          marginBottom="4"
++          borderRadius="md"
++        >
++          <Text fontSize="sm">{notice.text}</Text>
++        </Box>
++      )}
++
++      <Heading size="sm" marginBottom="2">字幕</Heading>
++      {field('字号', subtitleFontSize, setSubtitleFontSize, RANGES.subtitleFontSize,
++        '像素。以实际可读性为准')}
++      {field('最大宽度', subtitleMaxWidth, setSubtitleMaxWidth, RANGES.subtitleMaxWidth,
++        '像素。超出后按短句接续')}
++      {field('停留时间', subtitleDwellMs, setSubtitleDwellMs, RANGES.subtitleDwellMs,
++        '毫秒。一行说完后保留的时间')}
++
++      <Heading size="sm" marginTop="5" marginBottom="2">角色窗口</Heading>
++      {field('宽度', characterWidth, setCharacterWidth, RANGES.characterWidth,
++        '像素（Windows 缩放下的逻辑尺寸）')}
++      {field('高度', characterHeight, setCharacterHeight, RANGES.characterHeight,
++        '像素（Windows 缩放下的逻辑尺寸）')}
++      {field('模型缩放', characterScale, setCharacterScale, RANGES.characterScale,
++        '窗口内模型的缩放倍数')}
++
++      <Flex gap="3" marginTop="4">
++        <Button
++          colorPalette="blue"
++          disabled={busy || Boolean(loadError)}
++          onClick={() => void handleSave()}
++        >
++          保存
++        </Button>
++        <Button variant="ghost" disabled={busy} onClick={() => void load()}>
++          重新读取
++        </Button>
++      </Flex>
++    </Box>
++  );
++}
+diff --git a/src/renderer/src/components/aemeath/manage-page.tsx b/src/renderer/src/components/aemeath/manage-page.tsx
+index e166081..c757387 100644
+--- a/src/renderer/src/components/aemeath/manage-page.tsx
++++ b/src/renderer/src/components/aemeath/manage-page.tsx
+@@ -30,8 +30,9 @@ import {
+ import Live2DPage from './live2d-page';
+ import MemoryPage from './memory-page';
+ import VoicePage from './voice-page';
++import DesktopPage from './desktop-page';
+ 
+-type Page = 'overview' | 'model' | 'persona' | 'voice' | 'memory' | 'live2d';
++type Page = 'overview' | 'model' | 'persona' | 'voice' | 'memory' | 'live2d' | 'desktop';
+ 
+ const NAV: { id: Page; label: string }[] = [
+   { id: 'overview', label: '概览' },
+@@ -40,6 +41,7 @@ const NAV: { id: Page; label: string }[] = [
+   { id: 'voice', label: '声音' },
+   { id: 'memory', label: '记忆' },
+   { id: 'live2d', label: 'Live2D' },
++  { id: 'desktop', label: '桌面与字幕' },
+ ];
+ 
+ /** Banner describing the outcome of the last action. */
+@@ -403,6 +405,8 @@ export default function ManagePage(): JSX.Element {
+         {page === 'memory' && <MemoryPage />}
+ 
+         {page === 'live2d' && <Live2DPage />}
++
++        {page === 'desktop' && <DesktopPage />}
+       </Box>
+     </Flex>
+   );
+diff --git a/src/renderer/src/components/canvas/subtitle.tsx b/src/renderer/src/components/canvas/subtitle.tsx
+index 6cdadb9..73aca93 100644
+--- a/src/renderer/src/components/canvas/subtitle.tsx
++++ b/src/renderer/src/components/canvas/subtitle.tsx
+@@ -1,33 +1,77 @@
+ import { Box, Text } from '@chakra-ui/react';
+ import { memo } from 'react';
+-import { canvasStyles } from './canvas-styles';
+ import { useSubtitleDisplay } from '@/hooks/canvas/use-subtitle-display';
+ import { useSubtitle } from '@/context/subtitle-context';
++import { useDesktopSettings } from '@/context/desktop-settings-context';
+ 
+ // Type definitions
+ interface SubtitleTextProps {
+   text: string
++  fontSize: number
++  maxWidth: number
+ }
+ 
+-// Reusable components
+-const SubtitleText = memo(({ text }: SubtitleTextProps) => (
+-  <Text {...canvasStyles.subtitle.text}>
++/**
++ * The single line the character is speaking right now.
++ *
++ * V2-07 fixes two things about it: it sits under the model and above the
++ * taskbar as **one line**, and its size and width are user settings rather than
++ * constants. The plate and outline are what keep it readable over an otherwise
++ * transparent window.
++ */
++const SubtitleText = memo(({ text, fontSize, maxWidth }: SubtitleTextProps) => (
++  <Text
++    color="white"
++    fontSize={`${fontSize}px`}
++    lineHeight="1.45"
++    textAlign="center"
++    whiteSpace="nowrap"
++    overflow="hidden"
++    textOverflow="ellipsis"
++    maxWidth={`${maxWidth}px`}
++    paddingX="14px"
++    paddingY="6px"
++    borderRadius="10px"
++    backgroundColor="rgba(0, 0, 0, 0.62)"
++    style={{
++      // Over a bright window the dark plate alone can still read poorly, so the
++      // text also carries a thin dark outline.
++      textShadow: '0 0 3px rgba(0,0,0,0.95), 0 1px 2px rgba(0,0,0,0.9)',
++    }}
++  >
+     {text}
+   </Text>
+ ));
+ 
+ SubtitleText.displayName = 'SubtitleText';
+ 
+-// Main component
++/**
++ * The character window's subtitle.
++ *
++ * It renders whatever line the speech pipeline currently considers current; the
++ * audio path decides *when* a line becomes current and when it is retired, so
++ * a late frame cannot overwrite newer speech.
++ */
+ const Subtitle = memo((): JSX.Element | null => {
+   const { subtitleText, isLoaded } = useSubtitleDisplay();
+   const { showSubtitle } = useSubtitle();
++  const { settings } = useDesktopSettings();
+ 
+   if (!isLoaded || !subtitleText || !showSubtitle) return null;
+ 
+   return (
+-    <Box {...canvasStyles.subtitle.container}>
+-      <SubtitleText text={subtitleText} />
++    <Box
++      display="flex"
++      justifyContent="center"
++      alignItems="flex-end"
++      width="100%"
++      pointerEvents="none"
++    >
++      <SubtitleText
++        text={subtitleText}
++        fontSize={settings.subtitle_font_size}
++        maxWidth={settings.subtitle_max_width}
++      />
+     </Box>
+   );
+ });
+diff --git a/src/renderer/src/context/desktop-settings-context.tsx b/src/renderer/src/context/desktop-settings-context.tsx
+new file mode 100644
+index 0000000..baa33a6
+--- /dev/null
++++ b/src/renderer/src/context/desktop-settings-context.tsx
+@@ -0,0 +1,89 @@
++/* eslint-disable react/jsx-no-constructed-context-values */
++/**
++ * Desktop presentation settings: subtitle size and the character window.
++ *
++ * These live in the authoritative config through the management API rather than
++ * in `localStorage`, for the same reason every other V2 setting does: a value
++ * the user set in the management window must be the value the character window
++ * actually uses, and it must survive a reinstall.
++ *
++ * The defaults below are what the character uses while the settings are still
++ * loading, or when the backend cannot be reached. They are deliberately sane on
++ * their own — a card that has never been configured must still be readable.
++ */
++import React, {
++  createContext, useCallback, useContext, useEffect, useMemo, useState,
++} from 'react';
++
++import {
++  fetchDesktopSettings,
++  type DesktopSettings,
++} from '@/services/aemeath-management';
++
++/** Fallback values, used until the backend answers or if it cannot be reached. */
++export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
++  subtitle_font_size: 22,
++  subtitle_max_width: 520,
++  subtitle_dwell_ms: 4000,
++  character_width: 420,
++  character_height: 620,
++  character_scale: 1,
++  read_error: '',
++};
++
++interface DesktopSettingsContextValue {
++  settings: DesktopSettings;
++  /** Whether the values came from the backend rather than the fallback. */
++  loaded: boolean;
++  /** Why the settings could not be read, if they could not. */
++  error: string;
++  reload: () => Promise<void>;
++}
++
++const DesktopSettingsContext = createContext<DesktopSettingsContextValue>({
++  settings: DEFAULT_DESKTOP_SETTINGS,
++  loaded: false,
++  error: '',
++  reload: async () => {},
++});
++
++export function useDesktopSettings() {
++  return useContext(DesktopSettingsContext);
++}
++
++export function DesktopSettingsProvider({ children }: { children: React.ReactNode }) {
++  const [settings, setSettings] = useState<DesktopSettings>(DEFAULT_DESKTOP_SETTINGS);
++  const [loaded, setLoaded] = useState(false);
++  const [error, setError] = useState('');
++
++  const reload = useCallback(async () => {
++    try {
++      const data = await fetchDesktopSettings();
++      setSettings({ ...DEFAULT_DESKTOP_SETTINGS, ...data });
++      setError(data.read_error ?? '');
++      setLoaded(true);
++    } catch (err) {
++      // A failed read is not a reason to render nothing: the character keeps
++      // using the documented defaults, and the reason is available to the UI.
++      setError(err instanceof Error ? err.message : String(err));
++      setLoaded(true);
++    }
++  }, []);
++
++  useEffect(() => {
++    void reload();
++  }, [reload]);
++
++  const value = useMemo(
++    () => ({
++      settings, loaded, error, reload,
++    }),
++    [settings, loaded, error, reload],
++  );
++
++  return (
++    <DesktopSettingsContext.Provider value={value}>
++      {children}
++    </DesktopSettingsContext.Provider>
++  );
++}
+diff --git a/src/renderer/src/context/subtitle-context.tsx b/src/renderer/src/context/subtitle-context.tsx
+index fa2b18f..778a149 100644
+--- a/src/renderer/src/context/subtitle-context.tsx
++++ b/src/renderer/src/context/subtitle-context.tsx
+@@ -1,7 +1,27 @@
+ import {
+-  createContext, useState, useMemo, useContext, memo,
++  createContext, useState, useMemo, useContext, memo, useCallback, useRef, useEffect,
+ } from 'react';
+ 
++/**
++ * One line of speech the character is making right now.
++ *
++ * Carrying the turn and slice ids is what lets a late update be refused instead
++ * of overwriting newer speech — the same coordinates the audio path already
++ * uses, so there is no second notion of "which line is current".
++ */
++export interface SubtitleSegment {
++  /** Text to show. */
++  text: string
++  /** Turn this line belongs to, when the backend supplied one. */
++  turnId?: string | null
++  /** Audio slice this line belongs to, for voice replies. */
++  audioSliceId?: string | null
++  /** Where the line came from; a text reply uses its own reading queue. */
++  source: 'audio' | 'text' | 'system'
++  /** How long the line stays after it finishes, in milliseconds. */
++  dwellMs: number
++}
++
+ /**
+  * Subtitle context state interface
+  * @interface SubtitleState
+@@ -10,9 +30,15 @@ interface SubtitleState {
+   /** Current subtitle text */
+   subtitleText: string
+ 
+-  /** Set subtitle text */
++  /** Set subtitle text (queued as a text reply). */
+   setSubtitleText: (text: string) => void
+ 
++  /** Show the line the character is speaking now. */
++  showSegment: (segment: SubtitleSegment) => void
++
++  /** Drop the current line, e.g. on interruption or a mode switch. */
++  clearSegment: (reason?: string) => void
++
+   /** Whether to show subtitle */
+   showSubtitle: boolean
+ 
+@@ -28,6 +54,44 @@ const DEFAULT_SUBTITLE = {
+         + 'Ahh, you must be amazed by my awesomeness, right? right?',
+ };
+ 
++/** How long a line stays on screen when the caller does not say. */
++export const DEFAULT_SUBTITLE_DWELL_MS = 4000;
++
++/** Longest a line may stay, so a stuck timer cannot pin stale text. */
++const MAX_DWELL_MS = 60000;
++
++/** Shortest time a line stays, so it cannot flash by unread. */
++const MIN_DWELL_MS = 500;
++
++/**
++ * Split a reply into display-sized pieces.
++ *
++ * V2-07 asks for one line at a time and forbids showing the whole pending reply
++ * as if it were already being spoken. Sentences are therefore queued and shown
++ * one by one; text with no sentence punctuation is split by length so it still
++ * cannot overflow a single line indefinitely.
++ */
++export function splitIntoSegments(text: string, maxChars = 42): string[] {
++  const cleaned = text.trim();
++  if (!cleaned) return [];
++
++  // Keep the sentence punctuation attached to the sentence it ends.
++  const sentences = cleaned.match(/[^。！？!?；;\n]+[。！？!?；;]?/g) ?? [cleaned];
++  const pieces: string[] = [];
++
++  sentences.forEach((sentence) => {
++    let rest = sentence.trim();
++    if (!rest) return;
++    while (rest.length > maxChars) {
++      pieces.push(rest.slice(0, maxChars));
++      rest = rest.slice(maxChars);
++    }
++    if (rest) pieces.push(rest);
++  });
++
++  return pieces;
++}
++
+ /**
+  * Create the subtitle context
+  */
+@@ -45,15 +109,122 @@ export const SubtitleProvider = memo(({ children }: { children: React.ReactNode
+   const [subtitleText, setSubtitleText] = useState<string>(DEFAULT_SUBTITLE.text);
+   const [showSubtitle, setShowSubtitle] = useState<boolean>(true);
+ 
++  // The line currently on screen, and the timer that will retire it.
++  const segmentRef = useRef<SubtitleSegment | null>(null);
++  const dwellTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
++  // Queued pieces of a text reply, shown one at a time.
++  const textQueue = useRef<string[]>([]);
++  const textTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
++
++  const cancelDwell = useCallback(() => {
++    if (dwellTimer.current) {
++      clearTimeout(dwellTimer.current);
++      dwellTimer.current = null;
++    }
++  }, []);
++
++  const cancelTextQueue = useCallback(() => {
++    if (textTimer.current) {
++      clearTimeout(textTimer.current);
++      textTimer.current = null;
++    }
++    textQueue.current = [];
++  }, []);
++
++  const clearSegment = useCallback((reason?: string) => {
++    cancelDwell();
++    cancelTextQueue();
++    segmentRef.current = null;
++    if (reason) console.log(`[Subtitle] cleared: ${reason}`);
++    setSubtitleText('');
++  }, [cancelDwell, cancelTextQueue]);
++
++  /**
++   * Show one spoken line and schedule its removal.
++   *
++   * The same turn/slice coordinates as the audio path are recorded, so a caller
++   * can tell whether it is still showing the line it is about to replace.
++   */
++  const showSegment = useCallback((segment: SubtitleSegment) => {
++    // A voice line ends any text reading that is still in progress: the user
++    // should see what she is saying now, not the tail of a previous reply.
++    cancelTextQueue();
++    cancelDwell();
++    segmentRef.current = segment;
++    setSubtitleText(segment.text);
++
++    const dwell = Math.min(
++      Math.max(segment.dwellMs || DEFAULT_SUBTITLE_DWELL_MS, MIN_DWELL_MS),
++      MAX_DWELL_MS,
++    );
++    dwellTimer.current = setTimeout(() => {
++      // Only retire the line if nothing newer replaced it meanwhile.
++      if (segmentRef.current === segment) {
++        segmentRef.current = null;
++        setSubtitleText('');
++      }
++    }, dwell);
++  }, [cancelDwell, cancelTextQueue]);
++
++  /**
++   * Queue a text reply for reading, one piece at a time.
++   *
++   * Text replies have no audio to follow, so they get their own queue rather
++   * than being pushed through the audio-slice path: mixing the two would let a
++   * voice line and a text line fight over one string.
++   */
++  const enqueueTextReply = useCallback((text: string, dwellMs: number) => {
++    cancelTextQueue();
++    cancelDwell();
++    segmentRef.current = null;
++
++    const pieces = splitIntoSegments(text);
++    if (pieces.length === 0) return;
++
++    textQueue.current = pieces;
++
++    const showNext = () => {
++      const next = textQueue.current.shift();
++      if (next === undefined) return;
++      segmentRef.current = {
++        text: next, source: 'text', dwellMs,
++      };
++      setSubtitleText(next);
++      textTimer.current = setTimeout(
++        showNext,
++        Math.min(Math.max(dwellMs, 800), MAX_DWELL_MS),
++      );
++    };
++
++    showNext();
++  }, [cancelDwell, cancelTextQueue]);
++
++  // A compatibility setter: callers that just want text still work, but the
++  // value is queued as a text reply rather than shown all at once.
++  const setSubtitleTextCompat = useCallback((text: string) => {
++    if (!text) {
++      clearSegment('empty text');
++      return;
++    }
++    enqueueTextReply(text, DEFAULT_SUBTITLE_DWELL_MS);
++  }, [clearSegment, enqueueTextReply]);
++
++  useEffect(() => () => {
++    if (dwellTimer.current) clearTimeout(dwellTimer.current);
++    if (textTimer.current) clearTimeout(textTimer.current);
++  }, []);
++
+   // Memoized context value
+   const contextValue = useMemo(
+     () => ({
+       subtitleText,
+-      setSubtitleText,
++      setSubtitleText: setSubtitleTextCompat,
++      showSegment,
++      clearSegment,
+       showSubtitle,
+       setShowSubtitle,
+     }),
+-    [subtitleText, showSubtitle],
++    [subtitleText, setSubtitleTextCompat, showSegment, clearSegment, showSubtitle],
+   );
+ 
+   return (
+diff --git a/src/renderer/src/hooks/utils/use-audio-task.ts b/src/renderer/src/hooks/utils/use-audio-task.ts
+index 6f23229..e4cf46b 100644
+--- a/src/renderer/src/hooks/utils/use-audio-task.ts
++++ b/src/renderer/src/hooks/utils/use-audio-task.ts
+@@ -12,12 +12,10 @@ import { toaster } from '@/components/ui/toaster';
+ import { useWebSocket } from '@/context/websocket-context';
+ import { DisplayText } from '@/services/websocket-service';
+ import { useLive2DExpression } from '@/hooks/canvas/use-live2d-expression';
++import { useDesktopSettings } from '@/context/desktop-settings-context';
+ import { aemeathProtocol } from '@/services/aemeath-protocol';
+ import * as LAppDefine from '../../../WebSDK/src/lappdefine';
+ 
+-// Simple type alias for Live2D model
+-type Live2DModel = any;
+-
+ interface AudioTaskOptions {
+   audioBase64: string
+   volumes: number[]
+@@ -38,15 +36,19 @@ interface AudioTaskOptions {
+ export const useAudioTask = () => {
+   const { t } = useTranslation();
+   const { aiState, backendSynthComplete, setBackendSynthComplete } = useAiState();
+-  const { setSubtitleText } = useSubtitle();
++  const { setSubtitleText, showSegment, clearSegment } = useSubtitle();
+   const { appendResponse, appendAIMessage } = useChatHistory();
+   const { sendMessage } = useWebSocket();
+   const { setExpression } = useLive2DExpression();
++  const { settings } = useDesktopSettings();
+ 
+   // State refs to avoid stale closures
+   const stateRef = useRef({
+     aiState,
+     setSubtitleText,
++    showSubtitleSegment: showSegment,
++    clearSubtitleSegment: clearSegment,
++    subtitleDwellMs: () => settings.subtitle_dwell_ms,
+     appendResponse,
+     appendAIMessage,
+   });
+@@ -56,6 +58,9 @@ export const useAudioTask = () => {
+   stateRef.current = {
+     aiState,
+     setSubtitleText,
++    showSubtitleSegment: showSegment,
++    clearSubtitleSegment: clearSegment,
++    subtitleDwellMs: () => settings.subtitle_dwell_ms,
+     appendResponse,
+     appendAIMessage,
+   };
+@@ -73,7 +78,6 @@ export const useAudioTask = () => {
+   const handleAudioPlayback = (options: AudioTaskOptions): Promise<void> => new Promise((resolve) => {
+     const {
+       aiState: currentAiState,
+-      setSubtitleText: updateSubtitle,
+       appendResponse: appendText,
+       appendAIMessage: appendAI,
+     } = stateRef.current;
+@@ -100,13 +104,15 @@ export const useAudioTask = () => {
+ 
+     const { audioBase64, displayText, expressions, forwarded } = options;
+ 
+-    // Update display text
++    // Update display text.
++    //
++    // The subtitle is deliberately *not* set here. V2-07 requires the line to
++    // follow what is actually being played: setting it on enqueue would show
++    // speech that is still queued behind other audio, and a classroom switch or
++    // an interruption would leave the text on screen with no sound behind it.
+     if (displayText) {
+       appendText(displayText.text);
+       appendAI(displayText.text, displayText.name, displayText.avatar);
+-      if (audioBase64) {
+-        updateSubtitle(displayText.text);
+-      }
+       if (!forwarded) {
+         sendMessage({
+           type: "audio-play-start",
+@@ -121,53 +127,54 @@ export const useAudioTask = () => {
+       if (audioBase64) {
+         const audioDataUrl = `data:audio/wav;base64,${audioBase64}`;
+ 
+-        // Get Live2D manager and model
++        // Lip sync is an enhancement, not a precondition for speech.
++        //
++        // This used to `return` when no Live2D model was loaded, which meant a
++        // missing model silently swallowed the whole reply: no audio played and
++        // no playback receipt was ever sent. V2-08 requires the opposite —
++        // without a formal model the character must still talk — so a missing
++        // manager or model now only disables mouth movement and expression.
+         const live2dManager = (window as any).getLive2DManager?.();
+-        if (!live2dManager) {
+-          console.error('Live2D manager not found');
+-          resolve();
+-          return;
+-        }
+-
+-        const model = live2dManager.getModel(0);
++        const model = live2dManager?.getModel?.(0) ?? null;
+         if (!model) {
+-          console.error('Live2D model not found at index 0');
+-          resolve();
+-          return;
++          console.warn(
++            'No Live2D model available; playing audio without lip sync.',
++          );
+         }
+-        console.log('Found model for audio playback');
+ 
+-        if (!model._wavFileHandler) {
+-          console.warn('Model does not have _wavFileHandler for lip sync');
+-        } else {
+-          console.log('Model has _wavFileHandler available');
+-        }
++        if (model) {
++          if (!model._wavFileHandler) {
++            console.warn('Model does not have _wavFileHandler for lip sync');
++          }
+ 
+-        // Set expression if available
+-        const lappAdapter = (window as any).getLAppAdapter?.();
+-        if (lappAdapter && expressions?.[0] !== undefined) {
+-          setExpression(
+-            expressions[0],
+-            lappAdapter,
+-            `Set expression to: ${expressions[0]}`,
+-          );
+-        }
++          // Set expression if available
++          const lappAdapter = (window as any).getLAppAdapter?.();
++          if (lappAdapter && expressions?.[0] !== undefined) {
++            setExpression(
++              expressions[0],
++              lappAdapter,
++              `Set expression to: ${expressions[0]}`,
++            );
++          }
+ 
+-        // Start talk motion
+-        if (LAppDefine && LAppDefine.PriorityNormal) {
+-          console.log("Starting random 'Talk' motion");
+-          model.startRandomMotion(
+-            "Talk",
+-            LAppDefine.PriorityNormal,
+-          );
+-        } else {
+-          console.warn("LAppDefine.PriorityNormal not found - cannot start talk motion");
++          // Start talk motion
++          if (LAppDefine && LAppDefine.PriorityNormal) {
++            console.log("Starting random 'Talk' motion");
++            model.startRandomMotion(
++              "Talk",
++              LAppDefine.PriorityNormal,
++            );
++          } else {
++            console.warn("LAppDefine.PriorityNormal not found - cannot start talk motion");
++          }
+         }
+ 
+         // Setup audio element
+         const audio = new Audio(audioDataUrl);
+-        
+-        // Register with global audio manager IMMEDIATELY after creating audio
++
++        // Register with global audio manager IMMEDIATELY after creating audio.
++        // The model may be null here; the manager handles that, and keeping the
++        // audio registered is what makes stopping and receipts work at all.
+         audioManager.setCurrentAudio(audio, model, options.turnId);
+         let isFinished = false;
+ 
+@@ -198,12 +205,29 @@ export const useAudioTask = () => {
+             return;
+           }
+ 
+-          console.log('Starting audio playback with lip sync');
++          console.log(
++            model
++              ? 'Starting audio playback with lip sync'
++              : 'Starting audio playback without a Live2D model',
++          );
+           audio.play().catch((err) => {
+             console.error("Audio play error:", err);
+             cleanup();
+           });
+ 
++          // The line becomes current only now, when sound is actually being
++          // produced. It carries the same turn and slice ids as the audio, so a
++          // later frame for a superseded turn cannot take the screen back.
++          if (displayText) {
++            stateRef.current.showSubtitleSegment({
++              text: displayText.text,
++              turnId: options.turnId ?? null,
++              audioSliceId: options.audioSliceId ?? null,
++              source: 'audio',
++              dwellMs: stateRef.current.subtitleDwellMs(),
++            });
++          }
++
+           // Report that playback actually began, with the client-measured
+           // duration since the user stopped speaking.
+           // Only voice inputs (from VAD speech end) produce a valid voice latency sample.
+@@ -220,8 +244,8 @@ export const useAudioTask = () => {
+             });
+           }
+ 
+-          // Setup lip sync
+-          if (model._wavFileHandler) {
++          // Setup lip sync, when there is a model to drive.
++          if (model?._wavFileHandler) {
+             if (!model._wavFileHandler._initialized) {
+               console.log('Applying enhanced lip sync');
+               model._wavFileHandler._initialized = true;
+@@ -253,15 +277,27 @@ export const useAudioTask = () => {
+               audio_slice_id: options.audioSliceId ?? null,
+             });
+           }
++          // The spoken words stay on screen for the user's configured dwell
++          // time, then retire themselves; nothing here clears the line
++          // immediately, because that would remove it the instant the last
++          // syllable ends.
++          (window as any).api?.reportSpeaking?.(false);
+           (window as any).__aemeathTiming?.clearPlayback?.();
+           cleanup();
+         });
+ 
+         audio.addEventListener('error', (error) => {
+           console.error("Audio playback error:", error);
++          (window as any).api?.reportSpeaking?.(false);
+           cleanup();
+         });
+ 
++        // Tell the main process that sound is in progress, so the tray's
++        // "stop speaking" is a real operation rather than a guess.
++        audio.addEventListener('playing', () => {
++          (window as any).api?.reportSpeaking?.(true);
++        });
++
+         audio.load();
+       } else {
+         resolve();
+diff --git a/src/renderer/src/hooks/utils/use-interrupt.ts b/src/renderer/src/hooks/utils/use-interrupt.ts
+index d48f21e..d6686ae 100644
+--- a/src/renderer/src/hooks/utils/use-interrupt.ts
++++ b/src/renderer/src/hooks/utils/use-interrupt.ts
+@@ -12,7 +12,7 @@ export const useInterrupt = () => {
+   const { sendMessage } = useWebSocket();
+   const { fullResponse, clearResponse } = useChatHistory();
+   // const { currentModel } = useLive2DModel();
+-  const { subtitleText, setSubtitleText } = useSubtitle();
++  const { clearSegment } = useSubtitle();
+   const { stopCurrentAudioAndLipSync } = useAudioTask();
+ 
+   const interrupt = (sendSignal = true, trigger: 'click' | 'voice' = 'click') => {
+@@ -59,9 +59,10 @@ export const useInterrupt = () => {
+ 
+     clearResponse();
+ 
+-    if (subtitleText === 'Thinking...') {
+-      setSubtitleText('');
+-    }
++    // Interrupting also ends the line on screen: leaving the words of a
++    // sentence that was cut off would claim she said something she did not.
++    clearSegment('interrupted');
++    (window as any).api?.reportSpeaking?.(false);
+     console.log('Interrupted!');
+   };
+ 
+diff --git a/src/renderer/src/services/aemeath-management.ts b/src/renderer/src/services/aemeath-management.ts
+index 3ceb6e8..7e16e62 100644
+--- a/src/renderer/src/services/aemeath-management.ts
++++ b/src/renderer/src/services/aemeath-management.ts
+@@ -534,3 +534,71 @@ export async function saveLive2D(input: {
+     }),
+   });
+ }
++
++// ---------------------------------------------------------------------------
++// Desktop and subtitle (V2-T03)
++// ---------------------------------------------------------------------------
++
++/**
++ * Desktop presentation settings.
++ *
++ * These are read by the character window to lay out the subtitle and by the
++ * management window to edit them, so both windows agree on size and timing
++ * without a second copy of the values.
++ */
++export interface DesktopSettings {
++  /** Subtitle font size in pixels. */
++  subtitle_font_size: number;
++  /** Maximum subtitle width in pixels; content wraps beyond it. */
++  subtitle_max_width: number;
++  /** How long one line stays after it finishes, in milliseconds. */
++  subtitle_dwell_ms: number;
++  /** Character window width in pixels. */
++  character_width: number;
++  /** Character window height in pixels. */
++  character_height: number;
++  /** Model scale multiplier inside the character window. */
++  character_scale: number;
++  /** Why the settings could not be read, when they could not. */
++  read_error: string;
++}
++
++/** Outcome of saving desktop settings. */
++export interface DesktopSaveResult {
++  ok: boolean;
++  errors: FieldError[];
++  conflict: boolean;
++  message: string;
++  saved_revision: string;
++  running_revision: string;
++  restart_required: boolean;
++}
++
++/** Read the desktop and subtitle settings. */
++export async function fetchDesktopSettings(): Promise<DesktopSettings> {
++  return request<DesktopSettings>('/desktop/settings');
++}
++
++/** Save the desktop and subtitle settings. */
++export async function saveDesktopSettings(input: {
++  subtitleFontSize: number;
++  subtitleMaxWidth: number;
++  subtitleDwellMs: number;
++  characterWidth: number;
++  characterHeight: number;
++  characterScale: number;
++  expectedRevision: string;
++}): Promise<DesktopSaveResult> {
++  return request<DesktopSaveResult>('/desktop/settings', {
++    method: 'POST',
++    body: JSON.stringify({
++      subtitle_font_size: input.subtitleFontSize,
++      subtitle_max_width: input.subtitleMaxWidth,
++      subtitle_dwell_ms: input.subtitleDwellMs,
++      character_width: input.characterWidth,
++      character_height: input.characterHeight,
++      character_scale: input.characterScale,
++      expected_revision: input.expectedRevision,
++    }),
++  });
++}
+diff --git a/src/renderer/src/services/websocket-handler.tsx b/src/renderer/src/services/websocket-handler.tsx
+index 0d548f4..b9ccdb1 100644
+--- a/src/renderer/src/services/websocket-handler.tsx
++++ b/src/renderer/src/services/websocket-handler.tsx
+@@ -30,7 +30,7 @@ function WebSocketHandler({ children }: { children: React.ReactNode }) {
+   const [baseUrl, setBaseUrl] = useLocalStorage<string>('baseUrl', defaultBaseUrl);
+   const { aiState, setAiState, backendSynthComplete, setBackendSynthComplete } = useAiState();
+   const { setModelInfo } = useLive2DConfig();
+-  const { setSubtitleText } = useSubtitle();
++  const { setSubtitleText, clearSegment } = useSubtitle();
+   const { clearResponse, setForceNewMessage, appendHumanMessage, appendOrUpdateToolCallMessage } = useChatHistory();
+   const { addAudioTask, stopCurrentAudioAndLipSync } = useAudioTask();
+   const bgUrlContext = useBgUrl();
+@@ -182,6 +182,9 @@ function WebSocketHandler({ children }: { children: React.ReactNode }) {
+         stopCurrentAudioAndLipSync();
+         aemeathProtocol.cancelAllTurns();
+         setAiState('idle');
++        // The subsystem that silenced the character also removes its line:
++        // the words of a reply that will not be heard must not stay on screen.
++        clearSegment('clear-audio');
+         // Tell the backend the stop is complete, with how long it took.
+         if (cancelStopwatchRef.current) {
+           sendMessage({
+@@ -268,7 +271,7 @@ function WebSocketHandler({ children }: { children: React.ReactNode }) {
+       default:
+         return false;
+     }
+-  }, [sendMessage, setAiState, setSubtitleText, stopCurrentAudioAndLipSync]);
++  }, [sendMessage, setAiState, setSubtitleText, clearSegment, stopCurrentAudioAndLipSync]);
+ 
+   const handleWebSocketMessage = useCallback((message: MessageEvent) => {
+     console.log('Received message from server:', message);

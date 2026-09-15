@@ -104,6 +104,51 @@ JS 仅 hash 不同，说明源码与产物对应。
 
 构建走 vite + swc，不受这些 tsc 错误影响。
 
+## 构建与运行桌面客户端（V2-T03）
+
+上面那两步只构建 **web** 产物（部署到后端 `frontend/` 供浏览器访问）。
+需要**角色常驻桌面**时改用桌面构建：
+
+```powershell
+cd E:\WorkSpace\Aemeath
+powershell -ExecutionPolicy Bypass -File .\scripts\build-desktop.ps1
+# 产物：vendor\Open-LLM-VTuber-Web\release\win-unpacked\Aemeath.exe
+```
+
+先启动后端，再运行 `Aemeath.exe`。角色窗口会直接以桌宠形态出现在**所在显示器的
+右下角**（距屏幕边缘与任务栏各 12 px），托盘图标的左键恢复角色、右键出菜单。
+
+> **不要用 `npm run build:win`。** 它在本机必然失败，原因与本项目代码无关：
+> `electron-builder` 解压 `winCodeSign` 工具链时要为 macOS 的 dylib 创建符号链接，
+> 而当前会话未启用开发者模式且非管理员，报 `Cannot create symbolic link`。
+> 该步骤只服务于代码签名。`build-desktop.ps1` 改为手工组装 electron-builder 的
+> `--dir` 布局（Electron 运行时 + `resources/app`），并自带四项自检。
+
+脚本处理的两个前提，手动构建时同样要注意：
+
+- **Electron 二进制默认没下载**。项目此前一直带 `ELECTRON_SKIP_BINARY_DOWNLOAD=1`
+  只做 web 构建，`node_modules/electron/dist/` 是空的。脚本会经代理与
+  `ELECTRON_MIRROR` 拉取（约 180 MB），已有则跳过。
+- **必须随包携带 `@electron-toolkit/*`**。主进程经 `externalizeDepsPlugin` 把这些
+  依赖留为 `require`，缺了会在启动时抛错，现象是**进程存活但窗口永不出现**——
+  与"构建失败"表现不同，很容易误判为成功。脚本第 4 步会断言它们存在。
+
+## 桌面验收
+
+```powershell
+# 需要后端已在 127.0.0.1:12393 运行
+.\vendor\Open-LLM-VTuber\.venv\Scripts\python.exe scripts\probe_desktop_v2.py
+```
+
+探针驱动**真实 unpacked 产物**并用 Win32 API 检查真实窗口，不经过浏览器通道，
+断言：进程存活、窗口可见、位于显示器工作区域内并贴在右下角、不覆盖任务栏、
+尺寸等于管理界面保存的配置值、只有一个角色窗口。全过时输出 `PROBE PASSED`。
+
+> 该探针能覆盖"窗口是否真的出现"和"配置是否真的生效"，
+> 但**不能**代替人工确认托盘菜单、拖动、鼠标穿透的手感与字幕观感；
+> 这些项目在 [验收记录](acceptance.md#十九v2-t03-桌面角色托盘与字幕集成2026-09-15)
+> 中明确记为待人工确认。
+
 ## 配置
 
 - 权威配置：`config/conf.aemeath.yaml`（**受版本管理**；只允许 `${VAR}` 引用，

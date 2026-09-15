@@ -973,3 +973,121 @@ PSD 由 `pytoshop` 写出再用 Krita 读回校验。
 
 完整身体拆层、正式模型交付、v2 管理与桌面开发、任何付费选项。未改动
 `model_dict.json`、`conf.yaml`、`character_config` 或既有补丁；定稿预览未被覆盖。
+
+## 十九、V2-T03 桌面角色、托盘与字幕集成（2026-09-15）
+
+**任务**：[#16](https://github.com/Finderlzy/Aemeath/issues/16)（V2-T03，V2-M2 桌面与首批交付）。
+**基线**：远端 `main` 的 `aeef0f2`（任务开工时为 `0cf275f`，期间 #21 已并入 main，本分支已 rebase）。
+**分支**：`issue-16-desktop-tray-subtitle`。
+**范围**：桌宠常驻与工作区域放置、独立管理窗口、托盘按职责定位、缺模型不阻断播放、
+按音频片段驱动的单行字幕、桌面与字幕设置页。
+
+### 逐条对照验收标准
+
+| # | 验收标准 | 结果 | 证据 |
+| --- | --- | --- | --- |
+| 1 | Windows 构建产物可启动；浏览器成功不能代替 | **通过** | `scripts/build-desktop.ps1` 生成 `release/win-unpacked/Aemeath.exe`；真实进程存活，渲染进程加载 Live2D、连接后端、启动麦克风与 VAD |
+| 2 | 右下角位置与任务栏关系正确 | **通过（自动化）** | 探针实测窗口 `(1478,370,430x650)`，工作区 `(0,0,1920x1032)`：距右边缘 12 px、距任务栏 12 px，窗口底边 1020 ≤ 工作区底边 1032 |
+| 3 | 拖动、缩放、穿透、隐藏与托盘恢复正常 | **部分通过** | 缩放：配置尺寸生效并实测；穿透：窗口以 `setIgnoreMouseEvents(true, {forward:true})` 启动并按组件悬停切换；**拖动与托盘交互需人工在真实桌面确认** |
+| 4 | 关闭管理窗口后角色继续对话 | **通过（结构）** | 管理窗口是独立 `BrowserWindow`，关闭不触碰角色窗口；角色窗口为唯一对话与音频所有者（`isManagementWindow()` 在任何 provider 之前分流） |
+| 5 | 双窗口无重复收音、重复播放或重复回执 | **通过（结构）** | 管理页不挂载任何对话 Provider，不开麦克风、不播音频；托盘不再广播（`getAllWindows().forEach` 已移除） |
+| 6 | 无模型、加载失败、课堂、TTS 失败、打断与重连时字幕与语音正确 | **部分通过** | 缺模型播放路径已拆分（见下）；字幕清除接入打断与 `aemeath-clear-audio`。课堂／TTS 失败／重连的字幕表现待人工确认 |
+| 7 | 显示器移除或缩放变化后角色仍在可见区域 | **通过（自动化）** | `screen.on('display-removed'/'display-metrics-changed')` → `ensureVisible()` 夹回工作区；`clampToWorkArea` 有三条路径断言 |
+| 8 | **集成出口**：R1 与 R2 | **R1 通过、R2 通过** | 见「集成出口」一节 |
+
+### 修复的三个真实缺陷
+
+三个缺陷都**只在真实运行中暴露**，单元测试与构建成功都不会发现：
+
+**1. 窗口创建但永不显示（最危险）。** 初版把 windows 创建为 900×670 居中，再在
+`ready-to-show` 之后延时切换到桌宠形态。该切换经 IPC 往返，与窗口显示竞争，
+打包产物表现为**进程存活、渲染进程正常、但窗口始终不可见**——
+`visible=False` 在 45 秒采样中保持不变。它与"构建失败"和"应用崩溃"都不同，
+极易被误判为成功。修复为**在 `BrowserWindow` 构造函数里直接使用桌宠几何**，
+并在 `initialPetBounds()` 中一次算好位置，不再事后移动。
+
+定位依据是对照实验：同一环境下**未打补丁的上游客户端能正常显示 900×670 窗口**，
+从而排除环境因素，确认缺陷来自本次改动。
+
+**2. 缺 `@electron-toolkit` 导致主进程启动即抛错。** 主进程经
+`externalizeDepsPlugin` 将依赖留为 `require`，手工组装的 `resources/app` 最初未携带
+`node_modules`，主进程在 `require("@electron-toolkit/utils")` 处抛错。
+表现同样是"进程在、窗口不在"。修复：构建脚本携带该运行时依赖，并在第 4 步自检中
+断言其存在，缺失时直接失败而不是产出一个不会显示窗口的包。
+
+**3. 保存设置会抹掉整个配置文件的注释。** 初版 `desktop.py` 用
+`yaml.safe_dump` 重写整个文档。第一次在真实服务上保存即把
+`config/acceptance/conf.acceptance.yaml` 从 149 行改写为 119 行，
+**43 行说明注释全部丢失、引号风格被重排**。这正是 V2-T01 已修复过的缺陷类别，
+本次在新模块中重新出现。修复为沿用 T2-T01 的做法：**只对目标标量做文本级替换**
+（`_set_desktop_scalar` + `_desktop_block_span`），必要时插入 `desktop:` 段落。
+修复后实测：43 行注释全部保留，diff 从 149 行缩减为 **7 行新增**。
+
+### 集成出口（依赖 V2-T02，已完成）
+
+| 场景 | 结果 | 证据 |
+| --- | --- | --- |
+| R1 对话、打断、课堂静音、重启后同义召回 | **通过（回归）** | 真实服务实测：记忆 17 条 `available=true`、概览模型 `deepseek-v4.1-flash`、Live2D `mao_pro available=true`；全量回归 471 passed 未回退 |
+| R2 管理界面保存配置后实际生效 | **通过** | 经管理 API 保存 `character_width/height` 后重启角色窗口，探针实测窗口尺寸**等于保存值**（420×620 → 460×660 → 500×680 → 430×650 四次均一致） |
+
+R2 最初**不通过**：窗口始终用硬编码的 420×620。原因是主进程不读任何配置。
+修复为启动时先向管理 API 取设置（后端是权威，且能覆盖自定义 `AEMEATH_CONFIG`），
+失败再退回直接读配置文件；管理页保存后经 IPC 通知主进程重读。
+
+### 真实桌面验收（9/9 通过）
+
+`scripts/probe_desktop_v2.py` 驱动**真实 unpacked 产物**并用 Win32 API 检查真实窗口，
+不使用浏览器通道：
+
+```
+[PASS] build artifact exists
+[PASS] backend answering on loopback
+[PASS] application stays running
+[PASS] character window becomes visible
+[PASS] window sits inside the display work area      window=(1478,370,430x650) work_area=(0,0,1920x1032)
+[PASS] anchored to the bottom-right of the work area gap to right edge=12px, gap above taskbar=12px
+[PASS] does not cover the taskbar
+[PASS] window size matches the configured character size
+[PASS] only one character window exists
+9/9 checks passed — PROBE PASSED
+```
+
+连续三次运行结果一致（无偶发性）。探针的 `visible` 检查与"窗口尺寸等于配置值"检查
+都做过反向验证：修复前这两项失败，说明它们不是因为恒真而通过。
+
+### 构建产物与补丁可复现性
+
+`electron-builder --win` 在本机**无法完成**，原因与本项目代码无关：它解压
+`winCodeSign` 工具链时需为 macOS dylib 创建符号链接，而当前会话未启用开发者模式
+且非管理员，报 `Cannot create symbolic link`。`scripts/build-desktop.ps1` 因此
+手工组装 electron-builder 的 `--dir` 布局（Electron 运行时 + `resources/app`），
+并自带四项自检。该路径已从零（删除 `release/`）完整复跑通过。
+
+`docs/patches/web/0003-aemeath-desktop-tray-subtitle.patch` 在**干净检出**（`d176e7d`）
+上按序套用 `0001`→`0002`→`0003`：三次 `git apply --check` 与实套全部成功，
+**17 个文件与工作副本 SHA256 逐字节一致**；补丁为 LF 行尾、无字面密钥
+（`scripts/check-secrets.ps1` 通过，扫描 117 个受版本管理文件）。
+
+### 回归基线
+
+`471 passed, 7 deselected`（本次新增 11 项，均在 `tests/integration/test_management_desktop.py`）。
+前端 `tsconfig.node.json` 与 `tsconfig.web.json` 两处类型检查在改动文件上零错误。
+
+### 未验证项与已知限制
+
+- **托盘交互未经人工确认。** Windows 11 的通知区域是绘制式而非可枚举窗口，
+  自动化无法断言托盘图标的显示、菜单项与"停止发言"的实际效果。托盘代码已按
+  职责分离（管理界面／显示角色／隐藏角色／停止发言／退出分别定向到对应窗口），
+  但**菜单可用性与点击结果需要用户实际确认**。
+- **拖动与鼠标穿透未经人工确认。** 窗口以穿透启动并按组件悬停切换，逻辑沿用上游
+  机制；但真实拖动手感与"空白区域穿透、模型区域可交互"需要在屏幕上实际验证。
+- **课堂状态、TTS 失败与网络重连时的字幕表现未单独走查。** 打断与 `aemeath-clear-audio`
+  的清除路径已接好，其余场景待人工确认。
+- **显示器热插拔未实测。** 代码在 `display-removed`／`display-metrics-changed` 时
+  夹回工作区，并有单元级断言，但未在多显示器环境中实际拔插。
+- **多显示器环境下未验证**：本机实测为单显示器 1920×1032 工作区。
+- **未做构建产物的代码签名**：`build:win` 的签名步骤在本机不可用，产物为未签名目录包，
+  供本机运行与验收；正式分发不在本任务范围。
+- 正式爱弥斯 Live2D 模型仍缺（V21-T01 阻塞于人工 Cubism 步骤），
+  桌面验收使用的是明确标识的上游示例模型 `mao_pro`，**不表示正式角色资产已完成**。
+

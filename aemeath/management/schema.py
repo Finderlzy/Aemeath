@@ -407,6 +407,46 @@ class Live2DSaveResult(BaseModel):
     restart_required: bool = False
 
 
+# ----------------------------------------------------------------------
+# Desktop and subtitle (V2-T03)
+# ----------------------------------------------------------------------
+
+
+class DesktopSettingsResponse(BaseModel):
+    """Subtitle and character-window presentation settings.
+
+    Both windows read the same values: the character window lays out its
+    subtitle with them, and the management window edits them. They therefore
+    live in the authoritative config rather than in either window's local state.
+    """
+
+    subtitle_font_size: int = 22
+    subtitle_max_width: int = 520
+    subtitle_dwell_ms: int = 4000
+    character_width: int = 420
+    character_height: int = 620
+    character_scale: float = 1.0
+    read_error: str = ""
+
+
+class DesktopSettingsRequest(BaseModel):
+    """The complete candidate set for a desktop settings save.
+
+    Every field is required: a partial update would leave the caller guessing
+    which values were kept, and the page always has the full set on screen.
+    """
+
+    subtitle_font_size: int = Field(..., description="Subtitle font size in px")
+    subtitle_max_width: int = Field(..., description="Max subtitle width in px")
+    subtitle_dwell_ms: int = Field(..., description="Line dwell time in ms")
+    character_width: int = Field(..., description="Character window width in px")
+    character_height: int = Field(..., description="Character window height in px")
+    character_scale: float = Field(..., description="Model scale multiplier")
+    expected_revision: str = Field(
+        ..., description="Revision the client read; guards concurrent edits"
+    )
+
+
 def to_dict(model: BaseModel) -> Dict[str, Any]:
     """Serialise a response model to plain JSON-compatible data."""
     return model.model_dump()
@@ -443,5 +483,7 @@ __all__ = [
     "Live2DOverviewResponse",
     "Live2DSaveRequest",
     "Live2DSaveResult",
+    "DesktopSettingsResponse",
+    "DesktopSettingsRequest",
     "to_dict",
 ]

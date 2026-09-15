@@ -901,3 +901,75 @@ GitHub 状态本次未能实时核实：`gh` 不在 PATH，公开 REST 查询返
   按既有结论（3D 空间混响、非纯净干声）不作正式音色。本轮未使用这些素材，
   也未改动上游示例模型与模型字典的既有取值。
 - 与 V2-T03 的双窗口集成验收未执行：本任务完成**不等于**「首批可用」通过。
+
+## 十八、V21-T01 抠图、分层与 Cubism 最小制作链路（2026-09-15）
+
+**任务**：[#21](https://github.com/Finderlzy/Aemeath/issues/21)（V21-T01，V21-M1 制作链路验证）。
+**未完成：Cubism 导入／绑定／导出三步待人工在编辑器中执行**（原因见下）。
+
+**范围**：验证「定稿 → 真实 alpha 抠图 → 最小分层 → PSD → Cubism 单参数绑定 → moc3 导出
+→ 现有客户端 Core 加载驱动」在本机是否成立，并给出可执行制作路线与自动／人工边界。
+
+**代码基线**：`0cf275f`（远端 main）。分支 `issue-21-live2d-sample-chain`。
+
+### 逐条对照验收标准
+
+| # | 验收标准 | 结果 | 证据 |
+| --- | --- | --- | --- |
+| 1 | 原稿 SHA256 一致、未覆盖；抠图含真实 alpha，白／黑／彩背景无棋盘格与明显灰边 | **通过** | 定稿 SHA256 `252825a4…5fd123` 与契约一致；抠图透明 78.8%、软边 10.3%；三背景对照图无灰底与棋盘格 |
+| 2 | Krita 保存后重开图层仍独立；PSD 在 Cubism 中保留顺序、透明及坐标 | **部分通过** | Krita 侧通过：9 层工程保存后重开，PSD 由 Krita 读回验证 8 层的名称／顺序／坐标／不透明度全部正确。**PSD 在 Cubism 中的导入验证属待执行部分** |
+| 3 | 至少一个眼或嘴参数可变形，实际导出 moc3，在固定客户端 Core 中加载并驱动 | **未通过（阻塞）** | 需要 Cubism GUI 手工绑定与导出，本会话无法执行；验证脚本 `probe_live2d_core.js` 已在已知样例上跑通，待导出后即可判定 |
+| 4 | 记录编辑器模式、导出目标、自动与人工步骤；失败明确阻塞 T02／T03 | **通过** | 见 `docs/live2d-production.md` 的 V21-T01 实测记录与自动化边界 |
+| 5 | 不自动购买或激活 PRO 试用；若不满足则列出限制与替代步骤 | **通过** | Cubism 标题栏实测为 `[ FREE版 ]`，未注册、未启动试用；限额与影响已记录 |
+
+### 关键结论
+
+**moc3 版本不兼容（本次最重要的发现）。** 实测两侧 Core 上限：
+
+| Core | 最高可读 moc3 版本 | 实测证据 |
+| --- | --- | --- |
+| Cubism 5.3 Editor 自带（Java） | **6** | `csmGetVersion = 06.00.0257`、`csmGetLatestMocVersion = 6` |
+| 现有客户端 WebSDK | **5** | `MocVersion_50 = 5`；自带样例 `mao_pro` = ver 5、`shizuku` = ver 3 |
+
+Cubism 5.3 默认导出 ver=6，现有客户端会以
+`csmReviveMocInPlace is failed. The Core unsupport later than moc3 ver:[5]` 拒绝加载。
+**导出时必须在 `[Export settings]` 把 (1) Export version 选为较旧 SDK 版本（≤5）**，
+否则验收标准 3 无法达成。该结论由 `scripts/verify_live2d_sample.py` 与
+`scripts/probe_live2d_core.js` 固化为自动断言。
+
+**自动化边界（实测，非推测）。** Cubism 导入 PSD、建变形器、导出 moc3 三步
+**只能人工在 GUI 中完成**：编辑器无 CLI 导出入口；自带 Core 只有运行时类、不能生成 moc3；
+External API 只能读写参数且默认关闭。Krita 侧同样受限——无 GUI 时 `exportImage`
+（PNG 与 PSD）与 `saveAs` 到 `.psd` 均阻塞在模态对话框，故分层工程由 Krita 生成、
+PSD 由 `pytoshop` 写出再用 Krita 读回校验。
+
+### 复现命令与结果
+
+| 入口 | 结果 |
+| --- | --- |
+| `python references/character/live2d/work/make_alpha.py` | 透明 78.8%、软边 10.3%、不透明 10.9% |
+| `kritarunner -s split_layers -f main`（PYTHONPATH=工作目录） | Krita 5.3.3 生成 9 层 `.kra`（6.75 MB），参考层锁定 |
+| `python references/character/live2d/work/write_psd.py` | 8 层 PSD，18,613,208 字节 |
+| `python references/character/live2d/work/psd_readback.py` | Krita 读回：8 层名称／顺序／坐标／不透明度全部正确 |
+| `python scripts/verify_live2d_sample.py` | **6 passed, 0 failed, 1 skipped**（skip = 导出包待人工产出） |
+| `node scripts/probe_live2d_core.js …/mao_pro.model3.json` | **通过**：客户端 Core 5.0.0 加载 moc3 ver=5、构建 128 参数、驱动 `ParamEyeLOpen` 1→1.2、**最大顶点位移 0.003894** |
+| 同上，moc3 头部改为 ver=6 | **按预期失败**：`moc3 version 6 exceeds the client Core ceiling of 5` |
+
+`probe_live2d_core.js` 用 moc3 ver=5 与 ver=6 两侧都验证过，确认它既能在成功时给出
+"几何确实移动"的读数，也能在版本过高时明确报错——不是只会打印"加载成功"。
+
+### 未完成与阻塞
+
+- **验收标准 3 未达成**：Cubism 内的 PSD 导入、参数绑定与 moc3 导出需人工 GUI 操作。
+  操作清单位于 `references/character/live2d/CUBISM-MANUAL-STEPS.md`；导出后由上述两个脚本判定。
+- **验收标准 2 的 Cubism 部分未验证**：PSD 在 Krita 侧已读回通过，但在 Cubism 中的图层顺序
+  与透明表现尚未核对。
+- 因此 **T02／T03 按依赖保持阻塞**，本任务不宣布完成，Issue 保留 open。
+- 抠图为平面程序化处理，**发丝级质量未做美术评估**；软边占比 10.3% 已记录，T02 需据此判断
+  是否要手工精修发丝与半透明衣摆。
+- 未做真实桌面尺寸下的观感检查（属 T05）。
+
+### 未纳入本任务
+
+完整身体拆层、正式模型交付、v2 管理与桌面开发、任何付费选项。未改动
+`model_dict.json`、`conf.yaml`、`character_config` 或既有补丁；定稿预览未被覆盖。

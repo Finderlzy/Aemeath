@@ -114,6 +114,26 @@ Copy-Item dist\web\index.html ..\Open-LLM-VTuber\frontend\index.html -Force
 cd ..\..
 ```
 
+### 5. 构建桌面程序（角色常驻桌面时使用）
+
+上面的步骤只产出 **web 客户端**（浏览器访问）。要让角色以桌宠形态常驻 Windows 桌面，
+改用：
+
+```powershell
+cd E:\WorkSpace\Aemeath
+powershell -ExecutionPolicy Bypass -File .\scripts\build-desktop.ps1
+# 产物：vendor\Open-LLM-VTuber-Web\release\win-unpacked\Aemeath.exe
+```
+
+先启动后端，再运行 `Aemeath.exe`。角色窗口直接出现在所在显示器的**右下角**
+（距屏幕边缘与任务栏各 12 px），托盘图标左键恢复角色、右键出菜单
+（管理界面／显示角色／隐藏角色／停止发言／退出）。管理界面是**独立窗口**，
+关闭它不影响角色继续对话。
+
+> 该脚本会同时构建并部署管理页。**不要用 `npm run build:win`**：它在本机因需要为
+> macOS dylib 创建符号链接而失败（缺少开发者模式或管理员权限），该步骤只服务于
+> 代码签名。原因、自检项与验收命令见 [启动手册](docs/runbook.md)。
+
 ---
 
 ## 四、外部与本地模型服务准备

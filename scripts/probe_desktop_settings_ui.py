@@ -28,6 +28,7 @@ Usage::
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -307,6 +308,9 @@ def main() -> int:
             process.wait(timeout=10)
         except subprocess.TimeoutExpired:
             process.kill()
+        # The throwaway Chrome profile is ~15 MB per run; leaving it behind
+        # accumulates silently in the system temp directory.
+        shutil.rmtree(profile, ignore_errors=True)
 
     passed = sum(1 for _, ok, _ in results if ok)
     print(f"\n{passed}/{len(results)} checks passed")

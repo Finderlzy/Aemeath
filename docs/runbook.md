@@ -320,7 +320,9 @@ Invoke-RestMethod -Uri 'http://127.0.0.1:12393/aemeath/manage/overview'
 
 ## 管理界面：声音、记忆与 Live2D（V2-T02）
 
-同一地址，导航扩展为六项：概览／模型／人设／声音／记忆／Live2D。
+同一地址，导航扩展为十项：概览／模型／人设／声音／声音训练／记忆／表达学习／黑话词典／Live2D／桌面与字幕。
+V2-T02 交付了其中的声音、记忆与 Live2D 三页；声音训练页见
+[声音训练向导的验证入口](#声音训练向导的验证入口)，表达学习与黑话词典见 V2-T04 相关章节。
 
 **记忆页。** 列表与搜索是两条路：列表直接读本地数据库，嵌入模型不可用时仍能查看与
 修正；搜索走向量检索。检索不可用时页面显示「检索不可用，这不是『没有记忆』」并给出
@@ -524,14 +526,15 @@ $env:PYTHONIOENCODING = "utf-8"
 - 干净 `v1.2.1` 检出按序套用 0001→0004 成功，8 个文件与工作副本逐字节一致
   （T01 重新核对；补丁 0004 见 [补丁清单](patches/README.md)）
 - 客户端 `npm run build:web` 成功，产物与部署文件 SHA256 相同
-- `pytest` **583 项通过, 7 deselected**（2026-09-15 V2-T05 复跑，见
-  [验收记录第二十一节](acceptance.md#二十一v2-t05-训练接入技术验证2026-09-15)）。7 项 `live_api` 默认排除，属预期。
+- `pytest` **634 项通过, 7 deselected**（2026-09-16 V2-T06 复跑，见
+  [验收记录第二十二节](acceptance.md#二十二v2-t06-完整声音训练向导2026-09-16)）。7 项 `live_api` 默认排除，属预期。
   历史基线：`71376f0` 上 244 项（[验收记录第九节](acceptance.md#九t00-证据复核与回归基线2026-09-13)），
   T01 新增 32 项主动语音、送达计数、TTS 引擎归属与 `end_turn` 顺序回归，
   T02 新增 12 项屏幕观察生命周期回归（迟到响应、关闭态不捕获），
   T05 接入前新增 42 项 GPT-SoVITS 回归（13 项真实上游引擎 + 29 项适配器，
   见 [验收记录第十节](acceptance.md#十当前回归基线gpt-sovits-接入后2026-09-13)）；
-  V2-T01 为 410 项、V2-T02 为 460 项、V2-T03 为 474 项、V2-T04 为 533 项、V2-T05 为 583 项。
+  V2-T01 为 410 项、V2-T02 为 460 项、V2-T03 为 474 项、V2-T04 为 533 项、
+  V2-T05 为 583 项、V2-T06 为 634 项。
   此处原记 330 项、更早记 224 项（160 + 64），均为补齐真实链路回归之前的旧数字，已更正。
 - 主动输出经真实上游生成器入口（`ServiceContext._install_aemeath_proactive_generator()`）
   产生**非空且可解码**的音频帧；课堂模式下不合成、不播放（T01）
@@ -547,8 +550,42 @@ $env:PYTHONIOENCODING = "utf-8"
 - 训练接入的阻塞事实（V2-T05）：固定版本上游 `48b1a01` 的 `s2_train.py` 无条件启用 DDP，
   Windows 单卡训练在 `backward()` 处以 `0xC0000005` 崩溃且无法在 Python 层捕获；
   应用 `docs/patches/upstream/s2-train-single-gpu-ddp.patch` 后同一配置训练成功
+- 声音训练向导（V2-T06）：真实 HTTP 全链路 **22/22** 通过——导入 4 条／18.48 秒素材、
+  切分 28.1s、校对提交、训练 115.9s 产出 2 个权重、试听 225324 字节音频、
+  应用后当前音色由 `default-sample` 切换为训练预设；浏览器页面 **14/14** 通过；
+  停止训练后用户既有 9880 服务存活且 HTTP 200；重启核对三用例符合契约且不自动重跑。
+  **流程通过，音色质量未达标**（素材仅 18.48 秒），不构成正式爱弥斯音色结论
 
 **上表为 2026-09-12 的实测记录。** 其中原列「尚未验证」的四项此后均已补齐：
 真实对话模型 API 往返（DeepSeek 真实对话 + 记忆提取）、麦克风实际采集（本地 SenseVoice）、
 屏幕真机捕获（前台窗口取景、不落盘）、延迟目标（文字 P95 达标；语音与停止样本用户已确认按现有样本收口）。
 完整交付验收结论见 [交付记录](delivery.md)；§7–§8 遗留项见该文件「未解决项」。
+
+## 声音训练向导的验证入口
+
+需要先启动本机 GPT-SoVITS api_v2（`.\scripts\start_gpt_sovits.ps1`）与 Aemeath 服务。
+
+```powershell
+cd E:\WorkSpace\Aemeath
+
+# 环境预检（含单卡 DDP 补丁是否生效）与重启状态核对，不训练
+.\vendor\Open-LLM-VTuber\.venv\Scripts\python.exe scripts\probe_training_wizard.py --preflight --restart
+
+# 进程内跑通六步（真实训练）；应用步骤交由下面 HTTP 探针验证
+.\vendor\Open-LLM-VTuber\.venv\Scripts\python.exe scripts\probe_training_wizard.py --flow --epochs 2
+
+# 停止范围：只停本应用启动的训练，不动用户自己的服务
+.\vendor\Open-LLM-VTuber\.venv\Scripts\python.exe scripts\probe_training_wizard.py --stop-scope
+
+# 真实服务 HTTP 全链路（含应用步骤，需要服务已在 12393 运行）
+.\vendor\Open-LLM-VTuber\.venv\Scripts\python.exe scripts\probe_training_wizard_http.py --all --epochs 2
+
+# 浏览器页面验证（真实 Chrome，14 项）
+.\vendor\Open-LLM-VTuber\.venv\Scripts\python.exe scripts\probe_training_wizard_ui.py
+```
+
+> **应用步骤只能在服务进程内验证。** 应用路径经上游
+> `src.open_llm_vtuber.config_manager` 校验，该模块只在服务进程内可导入；
+> 进程内探针会明确记录「已交由 HTTP 探针」，不冒充已验证。
+> 报告写入 `data/acceptance/training-wizard/`。
+

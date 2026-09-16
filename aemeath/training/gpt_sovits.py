@@ -817,6 +817,158 @@ def build_sovits_train_spec(
     )
 
 
+def build_gpt_train_spec(
+    *,
+    upstream_root: Path,
+    exp_name: str,
+    opt_dir: Path,
+    version: str = "v2",
+    python_exec: Optional[str] = None,
+    epochs: int = 15,
+    batch_size: int = 1,
+    work_dir: Optional[Path] = None,
+    gpu_numbers: str = "0",
+    save_every_epoch: int = 1,
+    if_save_latest: bool = True,
+    if_save_every_weights: bool = True,
+    if_dpo: bool = False,
+    pretrained_s1: Optional[Path] = None,
+) -> TrainingSpec:
+    """Build the GPT (``s1``) training stage.
+
+    The two branches are not interchangeable: SoVITS learns the timbre and GPT
+    learns the prosody and the mapping from text to semantic tokens. A voice
+    trained on SoVITS alone speaks in the right *voice* but keeps the base
+    model's *delivery*, which is why the wizard runs both.
+
+    Upstream's WebUI builds this from ``GPT_SoVITS/configs/s1longer-v2.yaml``,
+    writes it to ``TEMP/tmp_s1.yaml`` and runs ``s1_train.py --config_file``.
+    The shape is reproduced here — including the fields the WebUI sets that the
+    template does not contain (``pretrained_s1``, the two data paths, the output
+    directory), because ``s1_train.py`` reads them straight off the config.
+
+    Args:
+        upstream_root: Checkout root; also the working directory.
+        exp_name: Experiment name.
+        opt_dir: Experiment artefact directory (the preprocessed inputs).
+        version: Model version, e.g. ``v2``.
+        python_exec: Interpreter override.
+        epochs: Training epochs.
+        batch_size: Batch size; upstream halves it for fp32, as reproduced below.
+        work_dir: Where the generated config is written. Defaults to the
+            checkout's own ``TEMP/``, matching upstream.
+        gpu_numbers: GPU index list in upstream's dash form.
+        save_every_epoch: Checkpoint interval.
+        if_save_latest: Keep only the newest checkpoint.
+        if_save_every_weights: Also emit a directly loadable weight.
+        if_dpo: Whether to run upstream's DPO stage.
+        pretrained_s1: Starting GPT weights. Defaults to the version's
+            pretrained model when present.
+
+    Returns:
+        A :class:`TrainingSpec` ready to execute.
+
+    Raises:
+        FileNotFoundError: If the training script or config template is absent.
+    """
+    import yaml
+
+    script = upstream_root / "GPT_SoVITS" / "s1_train.py"
+    if not script.exists():
+        raise FileNotFoundError(f"上游训练脚本不存在: {script}")
+
+    template_name = "s1longer.yaml" if version == "v1" else "s1longer-v2.yaml"
+    template = upstream_root / "GPT_SoVITS" / "configs" / template_name
+    if not template.exists():
+        raise FileNotFoundError(f"上游训练配置模板不存在: {template}")
+
+    config = yaml.safe_load(template.read_text(encoding="utf-8")) or {}
+
+    weight_dir_name = GPT_WEIGHT_DIRS.get(version, "GPT_weights_v2")
+    weight_dir = upstream_root / weight_dir_name
+    weight_dir.mkdir(parents=True, exist_ok=True)
+    (opt_dir / f"logs_s1_{version}").mkdir(parents=True, exist_ok=True)
+
+    config.setdefault("train", {})
+    config.setdefault("data", {})
+
+    config["train"].update(
+        {
+            "batch_size": batch_size,
+            "epochs": epochs,
+            "save_every_n_epoch": save_every_epoch,
+            "if_save_every_weights": if_save_every_weights,
+            "if_save_latest": if_save_latest,
+            "if_dpo": if_dpo,
+            "half_weights_save_dir": str(weight_dir),
+            "exp_name": exp_name,
+        }
+    )
+    # ``s1_train.py`` reads these three off the config; the template has none of
+    # them, so omitting one fails with an AttributeError rather than a clear
+    # message about a missing input.
+    config["train_semantic_path"] = str(opt_dir / "6-name2semantic.tsv")
+    config["train_phoneme_path"] = str(opt_dir / "2-name2text.txt")
+    config["output_dir"] = str(opt_dir / f"logs_s1_{version}")
+
+    resolved_s1 = pretrained_s1 or _pretrained_gpt_path(upstream_root, version)
+    config["pretrained_s1"] = str(resolved_s1) if resolved_s1 else ""
+    config["version"] = version
+
+    config_dir = Path(work_dir) if work_dir is not None else upstream_root / "TEMP"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / f"aemeath_tmp_s1_{exp_name}.yaml"
+    # Upstream writes YAML here, not JSON, and ``s1_train.py`` parses it as such.
+    config_path.write_text(
+        yaml.dump(config, default_flow_style=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+
+    return TrainingSpec(
+        stage="gpt",
+        command=[
+            python_exec or training_python(upstream_root),
+            "-s",
+            str(script),
+            "--config_file",
+            str(config_path),
+        ],
+        env={
+            "_CUDA_VISIBLE_DEVICES": gpu_numbers,
+            "gpu_numbers": gpu_numbers,
+            # Upstream pins the semantic frame rate for the GPT branch.
+            "hz": "25hz",
+        },
+        cwd=str(upstream_root),
+        config_path=str(config_path),
+        outputs=[weight_dir],
+    )
+
+
+def _pretrained_gpt_path(upstream_root: Path, version: str) -> Optional[Path]:
+    """The base GPT weights fine-tuning starts from, when they are installed.
+
+    Args:
+        upstream_root: Checkout root.
+        version: Model version.
+
+    Returns:
+        The path, or ``None`` when this checkout has no pretrained GPT model —
+        in which case the config carries an empty value and upstream reports the
+        missing input itself.
+    """
+    base = upstream_root / "GPT_SoVITS" / "pretrained_models"
+    candidates = (
+        base / "s1bert25hz-5kh-longer-epoch=12-step=369668.ckpt",
+        base / "gsv-v2final-pretrained" / "s1bert25hz-5kh-longer-epoch=12-step=369668.ckpt",
+        base / "s1bert25hz-2kh-longer-epoch=68e-step=50232.ckpt",
+    )
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def find_artifacts(
     *,
     upstream_root: Path,

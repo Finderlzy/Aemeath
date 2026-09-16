@@ -238,8 +238,9 @@ GitGuardian 告警 `[Finderlzy/Aemeath] DeepSeek API Key exposed on GitHub`
 | `docs/patches/web/0002-aemeath-management-ui.patch` | `vendor/Open-LLM-VTuber-Web` | 管理界面与 `aemeath-management` API 客户端；管理窗口路由。V2-T01 含概览／模型／人设，V2-T02 增加声音／记忆／Live2D 三页 |
 | `docs/patches/web/0003-aemeath-desktop-tray-subtitle.patch` | `vendor/Open-LLM-VTuber-Web` | V2-T03 桌面集成：桌宠默认右下角与工作区域放置、独立管理窗口、托盘按职责定位、缺模型不阻断播放、按音频片段驱动的单行字幕、桌面与字幕设置页 |
 | `docs/patches/web/0004-aemeath-learning-pages.patch` | `vendor/Open-LLM-VTuber-Web` | V2-T04 表达学习与黑话词典页：状态筛选、来源语境展示、人工编辑优先、禁用与撤销、歧义词澄清 |
+| `docs/patches/web/0005-aemeath-training-wizard.patch` | `vendor/Open-LLM-VTuber-Web` | V2-T06 声音训练向导页：六步流程、步骤轨迹与运行状态、训练任务列表、校对、停止与重试，并入管理页导航 |
 
-**web 补丁按序套用**，`0002` 基于 `0001` 之后的 `App.tsx` 生成，`0003` 基于 `0001`＋`0002` 之后的树生成，`0004` 基于 `0001`～`0003` 之后的树生成。
+**web 补丁按序套用**，`0002` 基于 `0001` 之后的 `App.tsx` 生成，`0003` 基于 `0001`＋`0002` 之后的树生成，`0004` 基于 `0001`～`0003` 之后的树生成，`0005` 基于 `0001`～`0004` 之后的树生成。
 
 > **重新生成 web 补丁时必须在前序补丁已套用的树上做。**
 > 必须使用 `powershell -ExecutionPolicy Bypass -File .\scripts\regen-web-patch.ps1 -Patch <编号>`，
@@ -252,6 +253,7 @@ git apply ..\..\docs\patches\web\0001-aemeath-web-client.patch
 git apply ..\..\docs\patches\web\0002-aemeath-management-ui.patch
 git apply ..\..\docs\patches\web\0003-aemeath-desktop-tray-subtitle.patch
 git apply ..\..\docs\patches\web\0004-aemeath-learning-pages.patch
+git apply ..\..\docs\patches\web\0005-aemeath-training-wizard.patch
 ```
 
 套用后执行编译并部署到后端：

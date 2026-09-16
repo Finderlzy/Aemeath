@@ -1,0 +1,1009 @@
+diff --git a/src/renderer/src/components/aemeath/manage-page.tsx b/src/renderer/src/components/aemeath/manage-page.tsx
+index c1b5d96..dbce256 100644
+--- a/src/renderer/src/components/aemeath/manage-page.tsx
++++ b/src/renderer/src/components/aemeath/manage-page.tsx
+@@ -33,12 +33,14 @@ import VoicePage from './voice-page';
+ import DesktopPage from './desktop-page';
+ import ExpressionPage from './expression-page';
+ import JargonPage from './jargon-page';
++import TrainingPage from './training-page';
+ 
+ type Page =
+   | 'overview'
+   | 'model'
+   | 'persona'
+   | 'voice'
++  | 'training'
+   | 'memory'
+   | 'expression'
+   | 'jargon'
+@@ -50,6 +52,7 @@ const NAV: { id: Page; label: string }[] = [
+   { id: 'model', label: '模型' },
+   { id: 'persona', label: '人设' },
+   { id: 'voice', label: '声音' },
++  { id: 'training', label: '声音训练' },
+   { id: 'memory', label: '记忆' },
+   { id: 'expression', label: '表达学习' },
+   { id: 'jargon', label: '黑话词典' },
+@@ -415,6 +418,8 @@ export default function ManagePage(): JSX.Element {
+         )}
+         {page === 'voice' && <VoicePage />}
+ 
++        {page === 'training' && <TrainingPage />}
++
+         {page === 'memory' && <MemoryPage />}
+ 
+         {page === 'expression' && <ExpressionPage />}
+diff --git a/src/renderer/src/components/aemeath/training-page.tsx b/src/renderer/src/components/aemeath/training-page.tsx
+new file mode 100644
+index 0000000..1279fbc
+--- /dev/null
++++ b/src/renderer/src/components/aemeath/training-page.tsx
+@@ -0,0 +1,726 @@
++/* eslint-disable @typescript-eslint/no-explicit-any */
++/**
++ * Voice training wizard (v2 task V2-T06).
++ *
++ * Six steps: 导入素材 → 清理切分 → 校对文字 → 训练 → 试听 → 应用.
++ *
++ * Five rules from the acceptance criteria decide what this screen may do:
++ *
++ * 1. **Training outlives the page.** The backend launches a process and tracks
++ *    it; this component only polls. Closing the management window therefore
++ *    cancels nothing, and re-opening it shows the real state rather than a
++ *    fresh one — so the poll runs on a timer rather than on mount alone.
++ * 2. **No invented progress.** Upstream reports no reliable percentage, so the
++ *    page shows the current step and run state and never draws a progress bar.
++ * 3. **Proofreading is the user's step.** Nothing here fills the transcripts
++ *    in automatically, and the page says why: a good ASR pass is not evidence
++ *    that the audio and text agree.
++ * 4. **Auditioning is not applying.** The two are separate buttons with a
++ *    confirmation between them, and a failed apply states plainly that the
++ *    previous voice is still in use.
++ * 5. **The advanced entry point stays reachable.** The original GPT-SoVITS
++ *    WebUI is linked, because the wizard intentionally exposes only the
++ *    ordinary path.
++ *
++ * The page performs no conversation: it opens no microphone and does not touch
++ * the character window's audio queue. Auditioning plays through a plain
++ * `Audio` element that is stopped when the page goes away.
++ */
++import { useCallback, useEffect, useRef, useState } from 'react';
++import { Box, Button, Flex, Heading, Input, Text, Textarea } from '@chakra-ui/react';
++
++import {
++  applyTraining,
++  auditionTraining,
++  fetchTraining,
++  fetchTrainingClips,
++  fetchTrainingPreflight,
++  importTrainingMaterial,
++  prepareTrainingJob,
++  retryTraining,
++  startTraining,
++  stopTraining,
++  submitTrainingProofread,
++  TRAINING_STATE_LABEL,
++  trainingStateIsActive,
++  type TrainingClip,
++  type TrainingJobView,
++  type TrainingOverviewResponse,
++  type TrainingPreflight,
++} from '../../services/aemeath-management';
++
++interface Notice {
++  kind: 'ok' | 'error' | 'info';
++  text: string;
++}
++
++const NOTICE_COLOR: Record<Notice['kind'], string> = {
++  ok: 'green.300',
++  error: 'red.300',
++  info: 'blue.200',
++};
++
++/** Colours per state, so a settled outcome reads differently from a live one. */
++const STATE_COLOR: Record<string, string> = {
++  pending: 'whiteAlpha.600',
++  running: 'blue.200',
++  awaiting_proofread: 'orange.300',
++  stopping: 'orange.300',
++  stopped: 'whiteAlpha.600',
++  failed: 'red.300',
++  succeeded: 'green.300',
++};
++
++/** Advanced options stay collapsed; these are the values they apply. */
++const DEFAULT_AUDITION_TEXT = '你好，我是爱弥斯。';
++
++/** Poll interval while a task is live. */
++const POLL_MS = 3000;
++
++/** The upstream WebUI, kept as the advanced exit for this feature. */
++const ADVANCED_URL = 'http://127.0.0.1:9874';
++
++export default function TrainingPage(): JSX.Element {
++  const [data, setData] = useState<TrainingOverviewResponse | null>(null);
++  const [preflight, setPreflight] = useState<TrainingPreflight | null>(null);
++  const [loadError, setLoadError] = useState('');
++  const [notice, setNotice] = useState<Notice | null>(null);
++  const [busy, setBusy] = useState(false);
++
++  const [voiceName, setVoiceName] = useState('');
++  const [materialDir, setMaterialDir] = useState('');
++  const [selectedJob, setSelectedJob] = useState('');
++
++  const [clips, setClips] = useState<TrainingClip[]>([]);
++  const [editedText, setEditedText] = useState<Record<string, string>>({});
++
++  const [epochs, setEpochs] = useState(8);
++  const [batchSize, setBatchSize] = useState(1);
++  const [showAdvanced, setShowAdvanced] = useState(false);
++
++  const [auditionText, setAuditionText] = useState(DEFAULT_AUDITION_TEXT);
++  const [refAudio, setRefAudio] = useState('');
++  const [appliedPreset, setAppliedPreset] = useState('');
++
++  const audioRef = useRef<HTMLAudioElement | null>(null);
++
++  const load = useCallback(async () => {
++    try {
++      const overview = await fetchTraining();
++      setData(overview);
++      setLoadError('');
++      // Keep a selection pointed at something real: after the first task is
++      // created the page should show it without the user hunting for it.
++      if (!selectedJob && overview.jobs.length > 0) {
++        setSelectedJob(overview.jobs[0].job_id);
++      }
++      return overview;
++    } catch (error) {
++      setData(null);
++      setLoadError(error instanceof Error ? error.message : String(error));
++      return null;
++    }
++  }, [selectedJob]);
++
++  const loadPreflight = useCallback(async () => {
++    try {
++      setPreflight(await fetchTrainingPreflight());
++    } catch (error) {
++      // A preflight that cannot be read is not the same as one that failed;
++      // it is reported so the user knows the environment is simply unknown.
++      setPreflight(null);
++      setNotice({
++        kind: 'error',
++        text: `无法读取环境预检：${error instanceof Error ? error.message : String(error)}`,
++      });
++    }
++  }, []);
++
++  useEffect(() => {
++    void load();
++    void loadPreflight();
++    return () => {
++      audioRef.current?.pause();
++    };
++    // Intentionally runs once: `load` is re-created per selection, and polling
++    // below handles refreshes.
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, []);
++
++  const current: TrainingJobView | null =
++    data?.jobs.find((job) => job.job_id === selectedJob) ??
++    data?.jobs[0] ??
++    null;
++
++  // Poll while anything is live. This is what makes "closing the page does not
++  // cancel training" visible when the page comes back: the states shown are the
++  // backend's, not a local guess.
++  useEffect(() => {
++    const active = (data?.jobs ?? []).some((job) => trainingStateIsActive(job.state));
++    if (!active) return undefined;
++    const timer = window.setInterval(() => {
++      void load();
++    }, POLL_MS);
++    return () => window.clearInterval(timer);
++  }, [data, load]);
++
++  const loadClips = useCallback(async (jobId: string) => {
++    try {
++      const result = await fetchTrainingClips(jobId);
++      if (!result.ok) {
++        setNotice({ kind: 'error', text: result.error || '无法读取校对内容。' });
++        return;
++      }
++      setClips(result.clips);
++      const texts: Record<string, string> = {};
++      for (const clip of result.clips) texts[clip.path] = clip.text;
++      setEditedText(texts);
++    } catch (error) {
++      setNotice({
++        kind: 'error',
++        text: `无法读取校对内容：${error instanceof Error ? error.message : String(error)}`,
++      });
++    }
++  }, []);
++
++  const run = async (action: () => Promise<any>, successText: string) => {
++    setBusy(true);
++    setNotice(null);
++    try {
++      const result = await action();
++      if (result?.ok) {
++        setNotice({ kind: 'ok', text: successText });
++      } else {
++        const extra = result?.recovery?.length
++          ? `处理办法：${result.recovery.map((r: any) => r.action).join('；')}`
++          : '';
++        setNotice({
++          kind: 'error',
++          text: `${result?.error || '操作失败。'}${extra ? ` ${extra}` : ''}`,
++        });
++      }
++      await load();
++      return result;
++    } catch (error) {
++      setNotice({
++        kind: 'error',
++        text: error instanceof Error ? error.message : String(error),
++      });
++      return null;
++    } finally {
++      setBusy(false);
++    }
++  };
++
++  const createJob = async () => {
++    const result = await run(
++      () =>
++        importTrainingMaterial({
++          voiceName,
++          materialDir: materialDir || undefined,
++        }),
++      '已导入素材。',
++    );
++    if (result?.ok && result.job_id) {
++      setSelectedJob(result.job_id);
++      setNotice({
++        kind: 'ok',
++        text: `已导入 ${result.clip_count} 条素材，共 ${result.total_seconds} 秒。`,
++      });
++    }
++  };
++
++  const audition = async (job: TrainingJobView) => {
++    setBusy(true);
++    setNotice(null);
++    try {
++      const result = await auditionTraining(job.job_id, {
++        text: auditionText,
++        refAudioPath: refAudio,
++      });
++      if (!result.ok) {
++        setNotice({ kind: 'error', text: result.error || '试听失败。' });
++        return;
++      }
++      const audio = new Audio(
++        `data:audio/${result.media_type || 'wav'};base64,${result.audio}`,
++      );
++      audioRef.current?.pause();
++      audioRef.current = audio;
++      await audio.play();
++      setNotice({
++        kind: 'info',
++        text: '正在试听新训练的声音。此时角色仍使用原来应用中的音色，确认满意后再点「应用」。',
++      });
++    } catch (error) {
++      setNotice({
++        kind: 'error',
++        text: `无法播放试听音频：${error instanceof Error ? error.message : String(error)}`,
++      });
++    } finally {
++      setBusy(false);
++    }
++  };
++
++  const applyVoice = async (job: TrainingJobView) => {
++    const result = await run(
++      () =>
++        applyTraining(job.job_id, {
++          presetName: job.voice_name,
++          refAudioPath: refAudio,
++        }),
++      '已应用这个声音，重启 Aemeath 后生效。',
++    );
++    if (result?.ok) {
++      setAppliedPreset(result.preset_id || '');
++    } else {
++      // Said explicitly, because the user's real question after a failed apply
++      // is "what is she speaking with now?".
++      setNotice((previous) =>
++        previous
++          ? { ...previous, text: `${previous.text} 原来的音色保持不变。` }
++          : previous,
++      );
++    }
++  };
++
++  const stop = async (job: TrainingJobView) => {
++    await run(
++      () => stopTraining(job.job_id),
++      '已发送停止请求；只会停止本应用启动的训练，不影响你自己的 GPT-SoVITS 服务。',
++    );
++  };
++
++  const retry = async (job: TrainingJobView) => {
++    await run(() => retryTraining(job.job_id), '已重新开始训练。');
++  };
++
++  const prepare = async (job: TrainingJobView) => {
++    const result = await run(
++      () => prepareTrainingJob(job.job_id),
++      '清理切分完成，请进入校对步骤。',
++    );
++    if (result?.ok) await loadClips(job.job_id);
++  };
++
++  const proofread = async (job: TrainingJobView) => {
++    const payload = clips.map((clip) => ({
++      path: clip.path,
++      text: editedText[clip.path] ?? clip.text,
++    }));
++    await run(
++      () => submitTrainingProofread(job.job_id, payload),
++      '已提交校对结果，可以开始训练。',
++    );
++  };
++
++  const preflightBlocked = preflight !== null && !preflight.ok;
++
++  return (
++    <Box maxWidth="900px">
++      <Heading size="md" marginBottom="2">
++        声音训练
++      </Heading>
++      <Text fontSize="sm" marginBottom="4" color="whiteAlpha.800">
++        按步骤用本机 GPT-SoVITS 训练新声音。训练在后台进行，关闭本页面不会中断。
++      </Text>
++
++      {/* Environment readiness: blocking items and their fixes, plus the
++          warnings that do not stop training. */}
++      <Box
++        background="blackAlpha.400"
++        borderWidth="1px"
++        borderColor={preflightBlocked ? 'red.400' : 'whiteAlpha.300'}
++        padding="3"
++        marginBottom="4"
++        borderRadius="md"
++      >
++        <Text fontWeight="bold" fontSize="sm" marginBottom="1">
++          环境预检
++        </Text>
++        {preflight === null ? (
++          <Text fontSize="sm" color="whiteAlpha.700">
++            无法读取环境状态。
++          </Text>
++        ) : preflightBlocked ? (
++          <>
++            <Text fontSize="sm" color="red.300">
++              存在阻塞项，暂时不能训练：
++            </Text>
++            {preflight.recovery
++              .filter((item) => preflight.blocking.includes(item.problem))
++              .map((item) => (
++                <Text key={item.problem} fontSize="sm" marginTop="1">
++                  · {item.problem}
++                  <br />
++                  <Text as="span" color="orange.300">
++                    处理办法：{item.action}
++                  </Text>
++                </Text>
++              ))}
++          </>
++        ) : (
++          <Text fontSize="sm" color="green.300">
++            环境就绪
++            {preflight.ddp?.patched ? '（已包含单卡 DDP 修复）' : ''}。
++          </Text>
++        )}
++        {(preflight?.warnings ?? []).map((warning) => (
++          <Text key={warning} fontSize="xs" color="orange.300" marginTop="1">
++            提示：{warning}
++          </Text>
++        ))}
++      </Box>
++
++      {loadError && (
++        <Box
++          background="red.900"
++          borderWidth="1px"
++          borderColor="red.400"
++          padding="3"
++          marginBottom="4"
++          borderRadius="md"
++        >
++          <Text fontWeight="bold">无法读取训练任务</Text>
++          <Text fontSize="sm">{loadError}</Text>
++          <Button size="sm" marginTop="2" onClick={() => void load()}>
++            重试
++          </Button>
++        </Box>
++      )}
++
++      {notice && (
++        <Box
++          background="blackAlpha.400"
++          borderWidth="1px"
++          borderColor={NOTICE_COLOR[notice.kind]}
++          padding="3"
++          marginBottom="4"
++          borderRadius="md"
++        >
++          <Text fontSize="sm">{notice.text}</Text>
++        </Box>
++      )}
++
++      {/* Step 1: import. Only shown when it is the thing to do. */}
++      <Box marginBottom="6">
++        <Heading size="sm" marginBottom="2">
++          1. 导入素材
++        </Heading>
++        <Text fontSize="xs" color="whiteAlpha.700" marginBottom="2">
++          素材是若干条干净录音与一份标注文件（每行：音频路径｜说话人｜语言｜文字）。
++          至少需要 4 条、合计 10 秒以上才能开始。
++        </Text>
++        <Input
++          value={voiceName}
++          onChange={(e) => setVoiceName(e.target.value)}
++          placeholder="给这个声音起个名字，例如：爱弥斯 v1"
++          marginBottom="2"
++          size="sm"
++        />
++        <Input
++          value={materialDir}
++          onChange={(e) => setMaterialDir(e.target.value)}
++          placeholder="素材目录（留空则使用默认示例素材）"
++          marginBottom="2"
++          size="sm"
++        />
++        <Button
++          size="sm"
++          colorPalette="blue"
++          disabled={busy || !voiceName.trim()}
++          onClick={() => void createJob()}
++        >
++          导入并新建任务
++        </Button>
++      </Box>
++
++      {/* Task list. Always visible so a running job can be found again. */}
++      {(data?.jobs.length ?? 0) > 0 && (
++        <Box marginBottom="6">
++          <Heading size="sm" marginBottom="2">
++            训练任务
++          </Heading>
++          {data!.jobs.map((job) => (
++            <Box
++              key={job.job_id}
++              borderWidth="1px"
++              borderColor={job.job_id === current?.job_id ? 'blue.300' : 'whiteAlpha.300'}
++              background="blackAlpha.300"
++              padding="2"
++              marginBottom="2"
++              borderRadius="md"
++              cursor="pointer"
++              onClick={() => {
++                setSelectedJob(job.job_id);
++                setClips([]);
++                setEditedText({});
++              }}
++            >
++              <Flex justify="space-between" align="center">
++                <Text fontSize="sm" fontWeight="bold">
++                  {job.voice_name}
++                </Text>
++                <Text fontSize="xs" color={STATE_COLOR[job.state] ?? 'whiteAlpha.700'}>
++                  {TRAINING_STATE_LABEL[job.state] ?? job.state}
++                </Text>
++              </Flex>
++              <Text fontSize="xs" color="whiteAlpha.700">
++                当前步骤：{job.steps.find((step) => step.current)?.label ?? job.stage}
++              </Text>
++              {job.error && (
++                <Text fontSize="xs" color="red.300" marginTop="1">
++                  {job.error}
++                </Text>
++              )}
++            </Box>
++          ))}
++        </Box>
++      )}
++
++      {current && (
++        <Box>
++          <Heading size="sm" marginBottom="2">
++            步骤
++          </Heading>
++          <Flex gap="2" wrap="wrap" marginBottom="4">
++            {current.steps.map((step) => (
++              <Box
++                key={step.id}
++                borderWidth="1px"
++                borderColor={
++                  step.current ? 'blue.300' : step.done ? 'green.300' : 'whiteAlpha.300'
++                }
++                padding="1"
++                paddingX="2"
++                borderRadius="md"
++              >
++                <Text fontSize="xs">
++                  {step.done ? '✓ ' : ''}
++                  {step.label}
++                </Text>
++              </Box>
++            ))}
++          </Flex>
++
++          <Text fontSize="sm" marginBottom="4" color={STATE_COLOR[current.state]}>
++            运行状态：{TRAINING_STATE_LABEL[current.state] ?? current.state}
++            {current.detail ? ` — ${current.detail}` : ''}
++          </Text>
++
++          {/* Step 2 */}
++          <Box marginBottom="4">
++            <Heading size="sm" marginBottom="1">
++              2. 清理切分
++            </Heading>
++            <Text fontSize="xs" color="whiteAlpha.700" marginBottom="2">
++              按上游流程提取文本、语音特征与语义。输入未变时会直接复用上次结果。
++            </Text>
++            <Button
++              size="sm"
++              disabled={busy || jobBusy(current)}
++              onClick={() => void prepare(current)}
++            >
++              开始清理切分
++            </Button>
++          </Box>
++
++          {/* Step 3: proofreading needs the clips, loaded on demand. */}
++          <Box marginBottom="4">
++            <Heading size="sm" marginBottom="1">
++              3. 校对文字
++            </Heading>
++            <Text fontSize="xs" color="whiteAlpha.700" marginBottom="2">
++              请逐条核对音频与文字。<Text as="span" color="orange.300">
++                这一步只能由你确认——自动识别的成功并不代表素材准确。
++              </Text>
++            </Text>
++            {clips.length === 0 ? (
++              <Button
++                size="sm"
++                disabled={busy}
++                onClick={() => void loadClips(current.job_id)}
++              >
++                读取校对内容
++              </Button>
++            ) : (
++              <>
++                {clips.map((clip) => (
++                  <Box
++                    key={clip.path}
++                    borderWidth="1px"
++                    borderColor="whiteAlpha.300"
++                    padding="2"
++                    marginBottom="2"
++                    borderRadius="md"
++                  >
++                    <Flex justify="space-between" align="center" marginBottom="1">
++                      <Text fontSize="xs" color="whiteAlpha.700">
++                        {clip.name}
++                        {clip.exists ? '' : '（文件缺失）'}
++                      </Text>
++                      <audio controls src={`file://${clip.path}`} style={{ height: 28 }} />
++                    </Flex>
++                    <Textarea
++                      size="sm"
++                      rows={2}
++                      value={editedText[clip.path] ?? clip.text}
++                      onChange={(e) =>
++                        setEditedText({ ...editedText, [clip.path]: e.target.value })
++                      }
++                    />
++                  </Box>
++                ))}
++                <Button
++                  size="sm"
++                  colorPalette="blue"
++                  disabled={busy}
++                  onClick={() => void proofread(current)}
++                >
++                  确认这些文字
++                </Button>
++              </>
++            )}
++          </Box>
++
++          {/* Step 4 */}
++          <Box marginBottom="4">
++            <Heading size="sm" marginBottom="1">
++              4. 训练声音
++            </Heading>
++            <Text fontSize="xs" color="whiteAlpha.700" marginBottom="2">
++              训练需要数分钟，占用 GPU；训练期间本机语音仍可正常使用。
++            </Text>
++            <Flex gap="2" align="center" marginBottom="2">
++              <Button
++                size="sm"
++                colorPalette="blue"
++                disabled={busy || !canTrain(current) || preflightBlocked}
++                onClick={() =>
++                  void run(
++                    () => startTraining(current.job_id, { epochs, batchSize }),
++                    '训练已启动，可在本页查看状态。',
++                  )
++                }
++              >
++                开始训练
++              </Button>
++              {current.state === 'running' && (
++                <Button size="sm" colorPalette="red" disabled={busy} onClick={() => void stop(current)}>
++                  停止
++                </Button>
++              )}
++              {current.state === 'failed' && (
++                <Button size="sm" disabled={busy} onClick={() => void retry(current)}>
++                  重试
++                </Button>
++              )}
++              <Button size="sm" variant="ghost" onClick={() => setShowAdvanced(!showAdvanced)}>
++                {showAdvanced ? '收起高级参数' : '高级参数'}
++              </Button>
++            </Flex>
++            {showAdvanced && (
++              <Box marginBottom="2">
++                <Text fontSize="xs" color="whiteAlpha.700">
++                  默认值适合 8GB 显存：轮数 8、批大小 1。轮数越大越耗时，效果不保证线性提升。
++                </Text>
++                <Flex gap="2" marginTop="1">
++                  <Input
++                    size="sm"
++                    width="120px"
++                    value={epochs}
++                    onChange={(e) => setEpochs(Number(e.target.value) || 1)}
++                  />
++                  <Input
++                    size="sm"
++                    width="120px"
++                    value={batchSize}
++                    onChange={(e) => setBatchSize(Number(e.target.value) || 1)}
++                  />
++                </Flex>
++              </Box>
++            )}
++            {current.state === 'failed' && (
++              <Text fontSize="xs" color="red.300">
++                {current.error}
++              </Text>
++            )}
++          </Box>
++
++          {/* Steps 5-6, only once there is something to hear. */}
++          {current.state === 'succeeded' && (
++            <Box marginBottom="4">
++              <Heading size="sm" marginBottom="1">
++                5. 试听
++              </Heading>
++              <Flex gap="2" marginBottom="2">
++                <Input
++                  size="sm"
++                  value={auditionText}
++                  onChange={(e) => setAuditionText(e.target.value)}
++                />
++                <Button size="sm" disabled={busy} onClick={() => void audition(current)}>
++                  试听
++                </Button>
++              </Flex>
++              <Input
++                size="sm"
++                value={refAudio}
++                onChange={(e) => setRefAudio(e.target.value)}
++                placeholder="参考音频路径（留空则使用素材中的第一条）"
++                marginBottom="1"
++              />
++              <Text fontSize="xs" color="whiteAlpha.700" marginBottom="4">
++                参考音频决定克隆出的音色，它的文字必须与音频内容一致。
++              </Text>
++
++              <Heading size="sm" marginBottom="1">
++                6. 应用
++              </Heading>
++              <Text fontSize="xs" color="whiteAlpha.700" marginBottom="2">
++                试听满意后再应用。应用不会立即改变正在运行的对话，重启 Aemeath 后生效。
++              </Text>
++              <Button
++                size="sm"
++                colorPalette="green"
++                disabled={busy}
++                onClick={() => void applyVoice(current)}
++              >
++                应用这个声音
++              </Button>
++              {appliedPreset && (
++                <Text fontSize="xs" color="green.300" marginTop="1">
++                  已应用预设：{appliedPreset}
++                </Text>
++              )}
++            </Box>
++          )}
++        </Box>
++      )}
++
++      {/* The upstream UI stays reachable: the wizard is the ordinary path, not
++          the only one. It is not an acceptance substitute for this page. */}
++      <Box marginTop="6" borderTopWidth="1px" borderColor="whiteAlpha.300" paddingTop="3">
++        <Text fontSize="xs" color="whiteAlpha.700">
++          需要更细的控制时，可使用原 GPT-SoVITS 页面（高级入口）：
++          <Text as="span" color="blue.200">
++            {' '}
++            {ADVANCED_URL}
++          </Text>
++          。向导不替代它，它也不替代向导的验收。
++        </Text>
++      </Box>
++    </Box>
++  );
++}
++
++/** Whether a job is mid-operation, which disables the step buttons. */
++function jobBusy(job: TrainingJobView): boolean {
++  return job.state === 'running' || job.state === 'stopping';
++}
++
++/** Whether training may be started: the proofreading step must be settled. */
++function canTrain(job: TrainingJobView): boolean {
++  const proofread = job.steps.find((step) => step.id === 'proofread');
++  return Boolean(proofread?.done) && !jobBusy(job);
++}
+diff --git a/src/renderer/src/services/aemeath-management.ts b/src/renderer/src/services/aemeath-management.ts
+index 2fc32f8..4e11d6b 100644
+--- a/src/renderer/src/services/aemeath-management.ts
++++ b/src/renderer/src/services/aemeath-management.ts
+@@ -777,4 +777,235 @@ export async function resolveLearningMeanings(
+     method: 'POST',
+     body: JSON.stringify({ item_id: itemId, meanings }),
+   });
++}
++
++// ---------------------------------------------------------------------------
++// Voice training wizard (V2-T06)
++// ---------------------------------------------------------------------------
++
++/** One step of the wizard, as the page renders it. */
++export interface TrainingStepView {
++  id: string;
++  label: string;
++  done: boolean;
++  current: boolean;
++}
++
++/** Everything the wizard knows about one training task.
++ *
++ * There is deliberately no progress percentage: upstream reports no reliable
++ * one, so the page shows the step and the run state instead of inventing a bar.
++ */
++export interface TrainingJobView {
++  job_id: string;
++  voice_name: string;
++  exp_name: string;
++  /** pending / running / awaiting_proofread / stopping / stopped / failed / succeeded */
++  state: string;
++  stage: string;
++  detail: string;
++  error: string;
++  /** `infrastructure`, `material`, `environment` or empty. */
++  error_kind: string;
++  pid: number | null;
++  steps: TrainingStepView[];
++  artifacts: { path: string; size_bytes: number }[];
++  applied_preset_id: string;
++  upstream_commit: string;
++  upstream_dirty: boolean | null;
++  created_at: number;
++  updated_at: number;
++}
++
++/**
++ * The wizard page payload.
++ *
++ * `available` is separate from `jobs` because "no task started yet" and "the
++ * task store cannot be read" need different actions from the user.
++ */
++export interface TrainingOverviewResponse {
++  ok: boolean;
++  available: boolean;
++  error: string;
++  jobs: TrainingJobView[];
++  steps: { id: string; label: string; hint: string }[];
++  current: TrainingJobView | null;
++}
++
++/** One clip the user reviews during proofreading. */
++export interface TrainingClip {
++  path: string;
++  name: string;
++  text: string;
++  exists: boolean;
++}
++
++/** Outcome of a wizard action.
++ *
++ * `retryable` is not the same as `ok`: it says whether the failure *may* be
++ * repeated, while `ok` says whether this call did what it was asked to.
++ */
++export interface TrainingActionResult {
++  ok: boolean;
++  error: string;
++  retryable: boolean;
++  reason: string;
++  conflict: boolean;
++  job_id: string;
++  state: string;
++  pid: number | null;
++}
++
++/** Environment readiness for training. */
++export interface TrainingPreflight {
++  ok: boolean;
++  /** Problems that prevent training. */
++  blocking: string[];
++  /** Problems worth knowing about that do not prevent training. */
++  warnings: string[];
++  recovery: { problem: string; action: string }[];
++  ddp: { ok: boolean; patched: boolean; error: string; recovery: string };
++  ffmpeg: { available: boolean; path: string; error: string; recovery: string };
++  environment: Record<string, unknown>;
++}
++
++/** A synthesised audition sample; `audio` is base64. */
++export interface TrainingAuditionResponse {
++  ok: boolean;
++  error: string;
++  audio: string;
++  media_type: string;
++  weights: string;
++}
++
++/** List training tasks. */
++export async function fetchTraining(jobId = ''): Promise<TrainingOverviewResponse> {
++  const suffix = jobId ? `?job_id=${encodeURIComponent(jobId)}` : '';
++  return request<TrainingOverviewResponse>(`/training/overview${suffix}`);
++}
++
++/** Environment readiness, including the single-GPU DDP precondition. */
++export async function fetchTrainingPreflight(): Promise<TrainingPreflight> {
++  return request<TrainingPreflight>('/training/preflight');
++}
++
++/** One task's full state, including its steps and artefacts. */
++export async function fetchTrainingJob(
++  jobId: string,
++): Promise<{ ok: boolean; error: string; job: TrainingJobView | null }> {
++  return request(`/training/${encodeURIComponent(jobId)}`);
++}
++
++/** Step 1: open a task for a material set. */
++export async function importTrainingMaterial(input: {
++  voiceName: string;
++  materialDir?: string;
++  listPath?: string;
++}): Promise<TrainingActionResult & { clip_count?: number; total_seconds?: number }> {
++  return request('/training/import', {
++    method: 'POST',
++    body: JSON.stringify({
++      voice_name: input.voiceName,
++      material_dir: input.materialDir || null,
++      list_path: input.listPath || null,
++    }),
++  });
++}
++
++/** Step 2: clean and split the material. Long-running. */
++export async function prepareTrainingJob(
++  jobId: string,
++): Promise<TrainingActionResult & { reused?: boolean }> {
++  return request(`/training/${encodeURIComponent(jobId)}/prepare`, { method: 'POST' });
++}
++
++/** Step 3: read the clips and transcripts to review. */
++export async function fetchTrainingClips(
++  jobId: string,
++): Promise<{ ok: boolean; error: string; clips: TrainingClip[]; confirmed: boolean }> {
++  // The overview endpoint returns the job; the clips come from the same
++  // proofreading view the submit endpoint writes, so they are read here.
++  return request(`/training/${encodeURIComponent(jobId)}/proofread`);
++}
++
++/** Step 3: submit the corrected transcripts. Only a human closes this step. */
++export async function submitTrainingProofread(
++  jobId: string,
++  clips: { path: string; text: string }[],
++): Promise<TrainingActionResult> {
++  return request(`/training/${encodeURIComponent(jobId)}/proofread`, {
++    method: 'POST',
++    body: JSON.stringify({ clips }),
++  });
++}
++
++/** Step 4: start training. Returns as soon as the process is launched. */
++export async function startTraining(
++  jobId: string,
++  options: { epochs?: number; batchSize?: number; ifGradCkpt?: boolean } = {},
++): Promise<TrainingActionResult> {
++  return request(`/training/${encodeURIComponent(jobId)}/train`, {
++    method: 'POST',
++    body: JSON.stringify({
++      epochs: options.epochs ?? 8,
++      batch_size: options.batchSize ?? 1,
++      if_grad_ckpt: options.ifGradCkpt ?? false,
++    }),
++  });
++}
++
++/** Stop a run this application started. Scoped to its own PID. */
++export async function stopTraining(jobId: string): Promise<TrainingActionResult> {
++  return request(`/training/${encodeURIComponent(jobId)}/stop`, { method: 'POST' });
++}
++
++/** Repeat a run that may soundly be repeated. */
++export async function retryTraining(jobId: string): Promise<TrainingActionResult> {
++  return request(`/training/${encodeURIComponent(jobId)}/retry`, { method: 'POST' });
++}
++
++/** Step 5: hear the trained voice without applying it. */
++export async function auditionTraining(
++  jobId: string,
++  input: { text: string; refAudioPath?: string; promptText?: string },
++): Promise<TrainingAuditionResponse> {
++  return request(`/training/${encodeURIComponent(jobId)}/audition`, {
++    method: 'POST',
++    body: JSON.stringify({
++      text: input.text,
++      ref_audio_path: input.refAudioPath ?? '',
++      prompt_text: input.promptText ?? '',
++    }),
++  });
++}
++
++/** Step 6: make the trained voice the active one. */
++export async function applyTraining(
++  jobId: string,
++  input: { presetName?: string; refAudioPath?: string; promptText?: string } = {},
++): Promise<TrainingActionResult> {
++  return request(`/training/${encodeURIComponent(jobId)}/apply`, {
++    method: 'POST',
++    body: JSON.stringify({
++      preset_name: input.presetName ?? '',
++      ref_audio_path: input.refAudioPath ?? '',
++      prompt_text: input.promptText ?? '',
++    }),
++  });
++}
++
++/** Human labels for the training states, so the page never shows a raw enum. */
++export const TRAINING_STATE_LABEL: Record<string, string> = {
++  pending: '待开始',
++  running: '运行中',
++  awaiting_proofread: '等待你校对',
++  stopping: '停止中',
++  stopped: '已停止',
++  failed: '失败',
++  succeeded: '成功',
++};
++
++/** Whether a state means work is still in flight. */
++export function trainingStateIsActive(state: string): boolean {
++  return state === 'running' || state === 'stopping';
+ }
+\ No newline at end of file

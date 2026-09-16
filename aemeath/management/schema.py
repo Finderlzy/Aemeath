@@ -575,6 +575,175 @@ class LearningActionResult(BaseModel):
     status: str = ""
 
 
+# ---------------------------------------------------------------------------
+# Voice training wizard (V2-T06)
+# ---------------------------------------------------------------------------
+
+
+class TrainingStepView(BaseModel):
+    """One step of the wizard, as the page renders it."""
+
+    id: str
+    label: str
+    done: bool = False
+    current: bool = False
+
+
+class TrainingJobView(BaseModel):
+    """One training task.
+
+    There is deliberately no ``progress`` field. Upstream reports no reliable
+    percentage, and the architecture forbids inventing one, so the page shows
+    the step and the run state instead.
+    """
+
+    job_id: str
+    voice_name: str
+    exp_name: str
+    #: One of the JobState values: pending / running / awaiting_proofread /
+    #: stopping / stopped / failed / succeeded.
+    state: str
+    stage: str
+    detail: str = ""
+    error: str = ""
+    #: `infrastructure`, `material`, `environment` or empty.
+    error_kind: str = ""
+    pid: Optional[int] = None
+    steps: List[TrainingStepView] = Field(default_factory=list)
+    artifacts: List[Dict[str, Any]] = Field(default_factory=list)
+    applied_preset_id: str = ""
+    upstream_commit: str = ""
+    upstream_dirty: Optional[bool] = None
+    created_at: float = 0.0
+    updated_at: float = 0.0
+
+
+class TrainingOverviewResponse(BaseModel):
+    """The wizard page's payload.
+
+    ``available`` is separate from ``jobs`` on purpose: "no task has been
+    started yet" and "the task store cannot be read" call for different actions
+    from the user, and rendering both as an empty list hides that.
+    """
+
+    ok: bool = True
+    available: bool = True
+    error: str = ""
+    jobs: List[TrainingJobView] = Field(default_factory=list)
+    steps: List[Dict[str, str]] = Field(default_factory=list)
+    current: Optional[TrainingJobView] = None
+
+
+class TrainingDetailResponse(BaseModel):
+    """One task, with its steps and artefacts."""
+
+    ok: bool
+    error: str = ""
+    job: Optional[TrainingJobView] = None
+
+
+class TrainingImportRequest(BaseModel):
+    """Step 1: open a task for a set of material."""
+
+    voice_name: str
+    material_dir: Optional[str] = None
+    list_path: Optional[str] = None
+    exp_name: str = ""
+
+
+class TrainingClipRequest(BaseModel):
+    """One reviewed clip: its audio and the text the user settled on."""
+
+    path: str
+    text: str
+
+
+class TrainingProofreadRequest(BaseModel):
+    """Step 3: submit the corrected transcripts.
+
+    This is the only way the proofreading step closes; there is no automatic
+    path, because a successful ASR pass is not evidence the material is right.
+    """
+
+    clips: List[TrainingClipRequest] = Field(default_factory=list)
+
+
+class TrainingStartRequest(BaseModel):
+    """Step 4: start a run.
+
+    The defaults suit the 8 GB laptop GPU this project targets; the advanced
+    values are what the UI keeps collapsed.
+    """
+
+    epochs: int = 8
+    batch_size: int = 1
+    if_grad_ckpt: bool = False
+    #: Also train the GPT (prosody) branch, not only SoVITS (timbre).
+    train_gpt: bool = False
+
+
+class TrainingReferenceRequest(BaseModel):
+    """The reference clip a trained voice is applied with."""
+
+    ref_audio_path: str = ""
+    prompt_text: str = ""
+
+
+class TrainingAuditionRequest(BaseModel):
+    """Step 5: synthesise a sample without applying the voice."""
+
+    text: str = "你好，我是爱弥斯。"
+    ref_audio_path: str = ""
+    prompt_text: str = ""
+
+
+class TrainingApplyRequest(BaseModel):
+    """Step 6: make the trained voice the active one."""
+
+    preset_name: str = ""
+    ref_audio_path: str = ""
+    prompt_text: str = ""
+
+
+class TrainingActionResult(BaseModel):
+    """Outcome of a wizard action."""
+
+    ok: bool
+    error: str = ""
+    #: Whether the failure may soundly be retried; distinct from `ok`, which
+    #: says whether this call succeeded.
+    retryable: bool = False
+    reason: str = ""
+    conflict: bool = False
+    job_id: str = ""
+    state: str = ""
+    pid: Optional[int] = None
+
+
+class TrainingPreflightResponse(BaseModel):
+    """Environment readiness, with an action for every blocking item."""
+
+    ok: bool
+    blocking: List[str] = Field(default_factory=list)
+    #: Non-fatal problems worth mentioning. Separate from ``blocking`` because
+    #: the two ask different things of the user.
+    warnings: List[str] = Field(default_factory=list)
+    recovery: List[Dict[str, str]] = Field(default_factory=list)
+    ddp: Dict[str, Any] = Field(default_factory=dict)
+    ffmpeg: Dict[str, Any] = Field(default_factory=dict)
+    environment: Dict[str, Any] = Field(default_factory=dict)
+
+
+class TrainingAuditionResponse(BaseModel):
+    """A synthesised sample; `audio` is base64."""
+
+    ok: bool
+    error: str = ""
+    audio: str = ""
+    media_type: str = "wav"
+    weights: str = ""
+
+
 def to_dict(model: BaseModel) -> Dict[str, Any]:
     """Serialise a response model to plain JSON-compatible data."""
     return model.model_dump()
@@ -621,5 +790,19 @@ __all__ = [
     "LearningActionRequest",
     "LearningMeaningRequest",
     "LearningActionResult",
+    "TrainingStepView",
+    "TrainingJobView",
+    "TrainingOverviewResponse",
+    "TrainingDetailResponse",
+    "TrainingImportRequest",
+    "TrainingClipRequest",
+    "TrainingProofreadRequest",
+    "TrainingStartRequest",
+    "TrainingReferenceRequest",
+    "TrainingAuditionRequest",
+    "TrainingApplyRequest",
+    "TrainingActionResult",
+    "TrainingPreflightResponse",
+    "TrainingAuditionResponse",
     "to_dict",
 ]

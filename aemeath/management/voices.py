@@ -57,6 +57,7 @@ class VoiceService:
         config_path: Optional[Path] = None,
         *,
         transport: Optional[Callable[..., Any]] = None,
+        weight_transport: Optional[Callable[[str], Any]] = None,
     ) -> None:
         """Bind the service to a config file.
 
@@ -65,9 +66,15 @@ class VoiceService:
             transport: Injection point for audition requests. Production builds
                 an HTTP client through the adapter; tests supply a double so no
                 real service is needed.
+            weight_transport: Injection point for the weight-load call the
+                training wizard needs. Separate from ``transport`` because it is
+                a different endpoint (a control route, not synthesis) and a test
+                that only wants to check the model load should not have to fake
+                synthesis as well.
         """
         self._explicit_path = config_path
         self._transport = transport
+        self._weight_transport = weight_transport
 
     @property
     def config_path(self) -> Path:
@@ -640,6 +647,172 @@ class VoiceService:
         adapter = GPTSoVITSAdapter(**params)
         audio = await adapter.synthesize(text)
         return audio, params["media_type"]
+
+    async def audition_weights(
+        self,
+        record: Any,
+        weight_path: str,
+        *,
+        text: str,
+        timeout: float = 180.0,
+    ) -> Dict[str, Any]:
+        """Audition a freshly trained voice, before it is applied.
+
+        This is the wizard's step 5. Two things make it different from
+        :meth:`audition`:
+
+        * the weights are the ones training just produced, so they have to be
+          loaded into the running api_v2 service first
+          (``set_sovits_weights``); and
+        * **nothing in the Aemeath configuration changes.** The service now
+          holds different weights, but the character keeps speaking with the
+          voice the config selects until the user explicitly applies. That
+          separation is what "试听与应用分离" means in practice.
+
+        Args:
+            record: The training job, used for its material paths. Typed loosely
+                so this module does not depend on the training package.
+            weight_path: SoVITS weight produced by the run.
+            text: Sentence to synthesise.
+            timeout: Request timeout; a cold model load is slower than a warm
+                one, so this is longer than :meth:`audition`'s.
+
+        Returns:
+            ``{ok, audio, error, media_type, weights}`` with ``audio`` base64.
+        """
+        import base64
+
+        if not (text or "").strip():
+            return {
+                "ok": False,
+                "audio": "",
+                "error": "试听文字不能为空。",
+                "media_type": "",
+                "weights": weight_path,
+            }
+
+        reference = str(getattr(record, "ref_audio_path", "") or "")
+        prompt_text = str(getattr(record, "prompt_text", "") or "")
+        if not reference or not prompt_text:
+            from ..training.wizard import _pick_reference, _reference_transcript
+
+            reference = reference or _pick_reference(record)
+            prompt_text = prompt_text or _reference_transcript(record, reference)
+
+        if not reference or not prompt_text:
+            return {
+                "ok": False,
+                "audio": "",
+                "error": (
+                    "缺少参考音频或它的转写文字，无法试听。"
+                    "请在校对步骤确认素材后重试。"
+                ),
+                "media_type": "",
+                "weights": weight_path,
+            }
+
+        params = self._parameters(
+            api_url="http://127.0.0.1:9880/tts",
+            ref_audio_path=reference,
+            prompt_text=prompt_text,
+            text_lang="zh",
+            prompt_lang="zh",
+            text_split_method="cut5",
+            batch_size="1",
+            media_type="wav",
+            streaming_mode="false",
+        )
+
+        try:
+            await self._load_weights(params["api_url"], weight_path)
+        except Exception as exc:
+            if self._looks_unreachable(exc):
+                return {
+                    "ok": False,
+                    "audio": "",
+                    "error": (
+                        f"本地语音服务不可用（{params['api_url']}）：{exc}。"
+                        "请先启动 GPT-SoVITS 服务再试听。"
+                    ),
+                    "media_type": "",
+                    "weights": weight_path,
+                }
+            return {
+                "ok": False,
+                "audio": "",
+                "error": f"加载训练产物失败：{exc}",
+                "media_type": "",
+                "weights": weight_path,
+            }
+
+        try:
+            audio, media_type = await self._synthesise(params, text, timeout)
+        except Exception as exc:
+            if self._looks_unreachable(exc):
+                return {
+                    "ok": False,
+                    "audio": "",
+                    "error": (
+                        f"本地语音服务不可用（{params['api_url']}）：{exc}。"
+                        "请先启动 GPT-SoVITS 服务再试听。"
+                    ),
+                    "media_type": "",
+                    "weights": weight_path,
+                }
+            return {
+                "ok": False,
+                "audio": "",
+                "error": f"试听失败：{exc}",
+                "media_type": "",
+                "weights": weight_path,
+            }
+
+        return {
+            "ok": True,
+            "audio": base64.b64encode(audio).decode("ascii"),
+            "error": "",
+            "media_type": media_type,
+            "weights": weight_path,
+        }
+
+    async def _load_weights(self, api_url: str, weight_path: str) -> None:
+        """Point the running api_v2 service at freshly trained weights.
+
+        api_v2 exposes ``set_sovits_weights`` as a GET with a ``weights_path``
+        query parameter; the service keeps the model in memory afterwards, which
+        is why auditioning has to happen before applying and why applying does
+        not need to load anything itself.
+
+        Args:
+            api_url: The ``/tts`` endpoint, whose origin hosts the control
+                routes.
+            weight_path: Weight file to load.
+
+        Raises:
+            Exception: Whatever the transport raises; the caller classifies it.
+        """
+        from urllib.parse import urlencode, urlparse
+        from urllib.request import urlopen
+
+        parsed = urlparse(api_url)
+        base = f"{parsed.scheme}://{parsed.netloc}"
+        query = urlencode({"weights_path": weight_path})
+        endpoint = f"{base}/set_sovits_weights?{query}"
+
+        def _fetch() -> None:
+            with urlopen(endpoint, timeout=120) as response:  # noqa: S310 - loopback
+                if response.status != 200:
+                    raise RuntimeError(f"HTTP {response.status}")
+
+        if self._weight_transport is not None:
+            await self._weight_transport(endpoint)
+            return
+
+        # Loading a model is blocking I/O measured in seconds; keeping it off
+        # the event loop stops it from stalling every other management request.
+        import asyncio
+
+        await asyncio.to_thread(_fetch)
 
     @staticmethod
     def _looks_unreachable(exc: BaseException) -> bool:

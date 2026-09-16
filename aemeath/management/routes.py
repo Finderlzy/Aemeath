@@ -34,6 +34,11 @@ from .schema import (
     RestoreRequest,
     SaveModelRequest,
     SavePersonaRequest,
+    TrainingApplyRequest,
+    TrainingAuditionRequest,
+    TrainingImportRequest,
+    TrainingProofreadRequest,
+    TrainingStartRequest,
     VoiceApplyRequest,
     VoiceAuditionRequest,
     VoicePresetRequest,
@@ -559,6 +564,215 @@ def install_management_routes(app, config_path=None) -> None:
         result = _learning_service().resolve_ambiguity(
             item_id=payload.item_id,
             meanings=[entry.model_dump() for entry in payload.meanings],
+        )
+        return _respond(result)
+
+    # ------------------------------------------------------------------
+    # Voice training wizard (V2-T06)
+    # ------------------------------------------------------------------
+
+    #: One wizard service for the life of the process.
+    #:
+    #: This matters more here than it looks: the service owns the watcher
+    #: threads that track running training processes and write their state back
+    #: to the store. A per-request service would lose track of a run the moment
+    #: the request that started it returned, and the page would then show a task
+    #: that never advances.
+    _wizard: dict = {}
+
+    def _wizard_service():
+        """Build (once) the training wizard service."""
+        from ..training.jobs import TrainingJobStore, reconcile_startup
+        from ..training.wizard import TrainingWizardService, default_pid_alive
+        from ..config import load_config
+
+        if not _wizard:
+            data_dir = load_config().data_dir
+            store = TrainingJobStore(data_dir / "training" / "jobs.db")
+            _wizard["service"] = TrainingWizardService(store=store)
+            # A process that starts with jobs left `running` by a previous one
+            # must reconcile them before the page can show anything: the whole
+            # point is that the state survives the restart. The reconciliation
+            # never restarts training on its own.
+            try:
+                reconcile_startup(store, pid_alive=default_pid_alive)
+            except Exception:  # pragma: no cover - reconciliation is best effort
+                logger.exception("Could not reconcile training jobs on startup.")
+        return _wizard["service"]
+
+    @router.get("/training/overview")
+    async def training_overview(request: Request, job_id: str = ""):
+        """Tasks, their steps, and the current one's detail."""
+        refused = _guard(request)
+        if refused is not None:
+            return refused
+        return _wizard_service().overview(job_id=job_id)
+
+    @router.get("/training/preflight")
+    async def training_preflight(request: Request):
+        """Environment readiness, including the single-GPU DDP precondition.
+
+        A blocking item always comes with an action, because "CUDA 不可用" on
+        its own tells the user nothing they can do.
+        """
+        refused = _guard(request)
+        if refused is not None:
+            return refused
+        return _wizard_service().preflight()
+
+    @router.get("/training/{job_id}")
+    async def training_detail(request: Request, job_id: str):
+        """One task's full state."""
+        refused = _guard(request)
+        if refused is not None:
+            return refused
+        return _wizard_service().detail(job_id)
+
+    @router.post("/training/import")
+    async def training_import(
+        request: Request, payload: TrainingImportRequest = Body(...)
+    ):
+        """Step 1: open a task for a material set."""
+        refused = _guard(request)
+        if refused is not None:
+            return refused
+        result = _wizard_service().import_material(
+            voice_name=payload.voice_name,
+            material_dir=Path(payload.material_dir) if payload.material_dir else None,
+            list_path=Path(payload.list_path) if payload.list_path else None,
+            exp_name=payload.exp_name,
+        )
+        return _respond(result)
+
+    @router.post("/training/{job_id}/prepare")
+    async def training_prepare(request: Request, job_id: str):
+        """Step 2: clean and split the material.
+
+        Long-running, so it is dispatched to a worker thread: the request would
+        otherwise hold the connection for as long as preprocessing takes while
+        blocking every other management route.
+        """
+        refused = _guard(request)
+        if refused is not None:
+            return refused
+        import asyncio
+
+        service = _wizard_service()
+        return await asyncio.to_thread(service.run_preprocess, job_id)
+
+    @router.get("/training/{job_id}/proofread")
+    async def training_proofread_view(request: Request, job_id: str):
+        """The clips and transcripts to review, before the user submits them."""
+        refused = _guard(request)
+        if refused is not None:
+            return refused
+        return _wizard_service().proofread_payload(job_id)
+
+    @router.post("/training/{job_id}/proofread")
+    async def training_proofread(
+        request: Request, job_id: str, payload: TrainingProofreadRequest = Body(...)
+    ):
+        """Step 3: submit the user's corrected transcripts.
+
+        Only the user closes this step. There is no endpoint that derives the
+        text automatically, because a successful ASR pass is not evidence that
+        the material is correct.
+        """
+        refused = _guard(request)
+        if refused is not None:
+            return refused
+        result = _wizard_service().submit_proofread(
+            job_id, [clip.model_dump() for clip in payload.clips]
+        )
+        return _respond(result)
+
+    @router.post("/training/{job_id}/train")
+    async def training_start(
+        request: Request, job_id: str, payload: TrainingStartRequest = Body(...)
+    ):
+        """Step 4: start training.
+
+        Returns as soon as the process is launched; the run is tracked by the
+        service and survives this request, the page, and the app restarting.
+        """
+        refused = _guard(request)
+        if refused is not None:
+            return refused
+        result = _wizard_service().start_training(
+            job_id,
+            epochs=payload.epochs,
+            batch_size=payload.batch_size,
+            if_grad_ckpt=payload.if_grad_ckpt,
+        )
+        return _respond(result)
+
+    @router.post("/training/{job_id}/stop")
+    async def training_stop(request: Request, job_id: str):
+        """Stop a run this application started.
+
+        Scope is the PID recorded for this task and nothing else, so the user's
+        own GPT-SoVITS service is never touched.
+        """
+        refused = _guard(request)
+        if refused is not None:
+            return refused
+        result = _wizard_service().stop(job_id)
+        return _respond(result)
+
+    @router.post("/training/{job_id}/retry")
+    async def training_retry(request: Request, job_id: str):
+        """Repeat a run that may soundly be repeated."""
+        refused = _guard(request)
+        if refused is not None:
+            return refused
+        result = _wizard_service().retry(job_id)
+        return _respond(result)
+
+    @router.post("/training/{job_id}/audition")
+    async def training_audition(
+        request: Request, job_id: str, payload: TrainingAuditionRequest = Body(...)
+    ):
+        """Step 5: hear the trained voice without applying it."""
+        refused = _guard(request)
+        if refused is not None:
+            return refused
+        service = _wizard_service()
+        if payload.ref_audio_path:
+            service.set_reference(
+                job_id,
+                ref_audio_path=payload.ref_audio_path,
+                prompt_text=payload.prompt_text,
+            )
+        return await service.audition(
+            job_id, text=payload.text, voice_service=_voice_service()
+        )
+
+    @router.post("/training/{job_id}/apply")
+    async def training_apply(
+        request: Request, job_id: str, payload: TrainingApplyRequest = Body(...)
+    ):
+        """Step 6: make the trained voice the active one.
+
+        Delegates to the same transactional apply path the voice page uses, so
+        a failure leaves the previous voice exactly as it was.
+        """
+        refused = _guard(request)
+        if refused is not None:
+            return refused
+        service = _wizard_service()
+        if payload.ref_audio_path:
+            service.set_reference(
+                job_id,
+                ref_audio_path=payload.ref_audio_path,
+                prompt_text=payload.prompt_text,
+            )
+        # Loading weights into the running service and synthesising are both
+        # blocking I/O; the coroutine is awaited here, and the model load itself
+        # is dispatched to a thread inside the voice service.
+        result = await service.apply(
+            job_id,
+            preset_name=payload.preset_name,
+            voice_service=_voice_service(),
         )
         return _respond(result)
 

@@ -40,6 +40,7 @@ PAGES = (
     ("模型", "model"),
     ("人设", "persona"),
     ("声音", "voice"),
+    ("声音训练", "training"),
     ("记忆", "memory"),
     ("表达学习", "expression"),
     ("黑话词典", "jargon"),

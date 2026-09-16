@@ -254,30 +254,47 @@ def test_s2_config_template_has_the_fields_the_adapter_sets() -> None:
 
 
 def test_generated_config_is_accepted_by_the_real_template_shape() -> None:
-    """A spec built by the adapter lines up with the real template's keys."""
+    """A spec built by the adapter lines up with the real template's keys.
+
+    Building a spec has a side effect: the adapter creates the experiment
+    directory and the version's weight directory, exactly as upstream's WebUI
+    does. Those are cleaned up here so running the suite never leaves droppings
+    inside the user's own GPT-SoVITS checkout.
+    """
+    import shutil
     import tempfile
 
-    with tempfile.TemporaryDirectory() as work_dir:
-        spec = training.build_sovits_train_spec(
-            upstream_root=UPSTREAM_ROOT,
-            exp_name="__contract_probe__",
-            opt_dir=UPSTREAM_ROOT / "logs" / "__contract_probe__",
-            version="v2",
-            epochs=1,
-            batch_size=1,
-            work_dir=Path(work_dir),
-        )
-        generated = json.loads(Path(spec.config_path).read_text(encoding="utf-8"))
-        template = json.loads(read("GPT_SoVITS/configs/s2.json"))
+    exp_name = "__contract_probe__"
+    opt_dir = UPSTREAM_ROOT / "logs" / exp_name
+    weight_dir = UPSTREAM_ROOT / training.SOVITS_WEIGHT_DIRS["v2"]
 
-        # Every key the template defines must survive into the generated file,
-        # along with the ones the adapter adds.
-        for key in template["train"]:
-            assert key in generated["train"], f"generated config lost train.{key}"
-        for key in ("if_save_latest", "if_save_every_weights", "save_every_epoch", "gpu_numbers"):
-            assert key in generated["train"], f"generated config is missing train.{key}"
-        assert generated["train"]["epochs"] == 1
-        assert generated["train"]["batch_size"] == 1
-        # The experiment paths are what keep two runs apart in the shared TEMP/.
-        assert generated["name"] == "__contract_probe__"
-        assert generated["model"]["version"] == "v2"
+    try:
+        with tempfile.TemporaryDirectory() as work_dir:
+            spec = training.build_sovits_train_spec(
+                upstream_root=UPSTREAM_ROOT,
+                exp_name=exp_name,
+                opt_dir=opt_dir,
+                version="v2",
+                epochs=1,
+                batch_size=1,
+                work_dir=Path(work_dir),
+            )
+            generated = json.loads(Path(spec.config_path).read_text(encoding="utf-8"))
+            template = json.loads(read("GPT_SoVITS/configs/s2.json"))
+
+            # Every key the template defines must survive into the generated file,
+            # along with the ones the adapter adds.
+            for key in template["train"]:
+                assert key in generated["train"], f"generated config lost train.{key}"
+            for key in ("if_save_latest", "if_save_every_weights", "save_every_epoch", "gpu_numbers"):
+                assert key in generated["train"], f"generated config is missing train.{key}"
+            assert generated["train"]["epochs"] == 1
+            assert generated["train"]["batch_size"] == 1
+            # The experiment paths are what keep two runs apart in the shared TEMP/.
+            assert generated["name"] == exp_name
+            assert generated["model"]["version"] == "v2"
+    finally:
+        shutil.rmtree(opt_dir, ignore_errors=True)
+        # Only remove the weight directory if this test is what created it.
+        if not any(weight_dir.glob("*.pth")):
+            shutil.rmtree(weight_dir, ignore_errors=True)

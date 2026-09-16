@@ -29,12 +29,22 @@ git -C vendor/Open-LLM-VTuber -c http.proxy=http://127.0.0.1:7897 `
 git -c http.proxy=http://127.0.0.1:7897 clone --depth 1 --branch main `
     https://github.com/Open-LLM-VTuber/Open-LLM-VTuber-Web.git vendor/Open-LLM-VTuber-Web
 
-# 2. 按序套用四个补丁（顺序不能变，见 docs/patches/README.md）
+# 2. 按序套用补丁（顺序不能变，见 docs/patches/README.md）
 cd vendor/Open-LLM-VTuber
 git apply ..\..\docs\patches\0001-register-aemeath-agent.patch
 git apply ..\..\docs\patches\0002-register-aemeath-agent-config.patch
 git apply ..\..\docs\patches\0003-bridge-aemeath-runtime.patch
 git apply ..\..\docs\patches\0004-fix-tls-for-conversation-endpoint.patch
+git apply ..\..\docs\patches\0005-mount-aemeath-management-routes.patch
+cd ..\..
+
+cd vendor/Open-LLM-VTuber-Web
+git apply ..\..\docs\patches\web\0001-aemeath-web-client.patch
+git apply ..\..\docs\patches\web\0002-aemeath-management-ui.patch
+git apply ..\..\docs\patches\web\0003-aemeath-desktop-tray-subtitle.patch
+git apply ..\..\docs\patches\web\0004-aemeath-learning-pages.patch
+git apply ..\..\docs\patches\web\0005-aemeath-training-wizard.patch
+cd ..\vendor\Open-LLM-VTuber
 
 # 3. 安装依赖
 $env:HTTP_PROXY='http://127.0.0.1:7897'; $env:HTTPS_PROXY=$env:HTTP_PROXY

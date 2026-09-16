@@ -1,8 +1,12 @@
 # Aemeath 交付验收记录
 
-更新：2026-09-13。本文是 [project-delivery](../AGENTS.md) 职责下的**整体验收与交付证据**，
+更新：2026-09-16。本文是 [project-delivery](../AGENTS.md) 职责下的**整体验收与交付证据**，
 与 [验收记录](acceptance.md)（分阶段实跑证据）、[启动手册](runbook.md)（可复现命令）
 互补。本文只记录**本轮实际执行**的验证，区分通过、失败、未执行与不适用。
+
+包含：
+- 首期 v1.0.0 交付验收（第十二节以前历史记录）
+- **v2 完整交付验收（第十二节，2026-09-16，Issue #20 / V2-T07）**
 
 ## 一、自动化回归与基线
 
@@ -160,3 +164,57 @@ GPT-SoVITS `127.0.0.1:9880`（`/openapi.json` 200，GET /tts 契约校验 400 �
 源码归档不含 `vendor/`、本地模型、运行凭据、聊天数据和 Windows 安装器。
 第九节的延期、未达样本量与范围限制继续有效，Issue #7/#8 保留跟进。
 实际发布状态以 GitHub Release 页面为准。
+
+---
+
+## 十二、v2 完整交付验收（2026-09-16，Issue #20 / V2-T07）
+
+**任务**：[#20](https://github.com/Finderlzy/Aemeath/issues/20)（V2-T07，V2-M5 完整交付验收）。
+**基线**：远端 `main` 的 `080b587`，任务分支 `issue-20-v2-delivery-acceptance`。
+**性质**：按 `project-delivery` 做 v2 整体验收，不新增业务功能。前置依赖 #15、#16、#17、#19 均已关闭并在 main 分支集成。
+
+### 1. 全量回归基线
+
+| 项 | 命令 | 结果 |
+| --- | --- | --- |
+| 全量回归 | `.\vendor\Open-LLM-VTuber\.venv\Scripts\python.exe -m pytest` | **634 passed, 7 deselected**, 2 warnings (80.66s) |
+| 表达学习样例与一致性 | `... -m pytest tests/integration/test_learning_samples.py tests/integration/test_learning_consistency.py` | **43 passed** (18 样例 + 25 一致性) |
+| 训练向导与任务状态机 | `... -m pytest tests/integration/test_training_wizard.py tests/integration/test_training_jobs.py` | **51 passed** |
+
+634 项基线包含 v1 首期核心、管理 API 全端点、声音预设、桌面几何/托盘/字幕、表达与黑话学习、训练接入与声音训练向导全部回归，无任何测试失败。
+
+### 2. 真实能力与业务链路回归
+
+- **双窗口与桌面角色**：独立管理窗口与角色桌宠窗口完全解耦（`isManagementWindow` 在最前切流，管理窗口不开麦、不播音、不广播）；`scripts/probe_desktop_v2.py` 实测桌面角色窗口 `(1478,370,430x650)` 贴合屏幕工作区右下角，配置尺寸保存与重载实时生效。
+- **声音训练向导**：`scripts/probe_training_wizard.py` 实测预检通过（上游单卡 DDP 补丁已生效）；重启核对 A（进程退出有产物→succeeded）、B（进程退出无产物→failed）、C（进程存活→running）全绿；停止范围探针通过（训练进程精准终止，用户既有 9880 服务全程存活 HTTP 200）。**严谨口径重申**：18.48s 示例素材流程通过，音色质量未达标，不得冒称正式爱弥斯音色。
+- **表达与黑话学习**：独立样例集 18 用例（核心人设保护、自身复述误拒修复、用户引入新表达与黑话提取）与 25 用例一致性全绿；运行时提示词与动态注入实测有效。
+- **首期能力 R01–R06 与 E01**：文本对话、打断（`aemeath-clear-audio`）、课堂静音、服务重启保持、记忆召回、屏幕观察生命周期与本地 SQLite 边界全部稳态保持。
+
+### 3. 数据迁移与备份恢复验证
+
+在临时副本数据库上模拟旧版本 v1 (schema_version=1) 模式，经当前 `MemoryStore` 启动：
+- 自动触发平滑模式迁移 `1 -> 2`；
+- `messages` 自动补齐 `conversation_id`, `revision` 列；
+- `memories`, `embeddings`, `pending_extraction` 自动补齐 `revision` 列；
+- `memory_evidence` 自动补齐 `fragment` 列；
+- **全表行数统计前后完全相等，数据零丢失**；
+- 覆盖还原升级前备份文件即可完全回滚至旧版本模式，回退方案具备确定性。
+
+### 4. 干净目录可复现安装、补丁与构建
+
+在全新隔离目录中实际拉取上游固定版本源码，验证补丁按序套用：
+- 后端 5 个补丁（`0001`–`0005`）按序 `git apply --check` 全部 0 退出码，套用成功；
+- 前端 5 个补丁（`web/0001`–`web/0005`）按序 `git apply --check` 全部 0 退出码，套用成功；
+- 修复了 `0001-register-aemeath-agent.patch` 行尾与格式差异问题，消除反向比对误报。
+
+### 5. 文档与状态一致性核验
+
+- `README.md` 与 `docs/runbook.md` 补丁数量已更新为 5 后端 + 5 前端，测试基线更新为 634 项；
+- `docs/implementation-plan.md` 状态已同步核准（#14–#19 closed，#20 交付验收完成）；
+- 密钥扫描脚本 `scripts/check-secrets.ps1` 扫描全部版本管理文件 100% 通过。
+
+### 6. 未解决项说明
+
+- **#7 现场锁屏采录** 与 **#8 两次 30 分钟真人试用**：继续保留 2026-09-13 用户确认的延期上线后跟踪状态，不计入通过，不阻塞 v2 交付。
+- **正式爱弥斯音色**：保持非目标与限制说明，当前仅跑通训练向导流程与示例音色，正式音色待素材到位后另行训练。
+

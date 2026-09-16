@@ -1,8 +1,8 @@
 diff --git a/src/open_llm_vtuber/agent/agent_factory.py b/src/open_llm_vtuber/agent/agent_factory.py
-index 4892a23..ec3ba13 100644
+index 4892a23..753ed01 100644
 --- a/src/open_llm_vtuber/agent/agent_factory.py
 +++ b/src/open_llm_vtuber/agent/agent_factory.py
-@@ -128,5 +128,85 @@ class AgentFactory:
+@@ -128,5 +128,86 @@ class AgentFactory:
                  port=settings.get("port"),
              )
  

@@ -67,20 +67,25 @@ git -c http.proxy=http://127.0.0.1:7897 clone `
 git -C vendor/Open-LLM-VTuber-Web checkout d176e7df2366952e3bacbf12cf9a8b18a4315932
 ```
 
-### 2. 按序套用补丁 (4 后端 + 1 前端)
+### 2. 按序套用补丁 (5 后端 + 5 前端)
 
 ```powershell
-# 1) 后端四个补丁（必须按顺序套用）
+# 1) 后端五个补丁（必须按顺序套用）
 cd vendor/Open-LLM-VTuber
 git apply ..\..\docs\patches\0001-register-aemeath-agent.patch
 git apply ..\..\docs\patches\0002-register-aemeath-agent-config.patch
 git apply ..\..\docs\patches\0003-bridge-aemeath-runtime.patch
 git apply ..\..\docs\patches\0004-fix-tls-for-conversation-endpoint.patch
+git apply ..\..\docs\patches\0005-mount-aemeath-management-routes.patch
 cd ..\..
 
-# 2) 客户端补丁
+# 2) 客户端五个补丁（必须按顺序套用）
 cd vendor/Open-LLM-VTuber-Web
 git apply ..\..\docs\patches\web\0001-aemeath-web-client.patch
+git apply ..\..\docs\patches\web\0002-aemeath-management-ui.patch
+git apply ..\..\docs\patches\web\0003-aemeath-desktop-tray-subtitle.patch
+git apply ..\..\docs\patches\web\0004-aemeath-learning-pages.patch
+git apply ..\..\docs\patches\web\0005-aemeath-training-wizard.patch
 cd ..\..
 ```
 

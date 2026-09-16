@@ -57,19 +57,39 @@ process 0 terminated with exit code 3221225477
 
 ```powershell
 cd E:\WorkSpace\Tools\GPT-SoVITS
-git apply E:\WorkSpace\Aemeath\docs\patches\upstream\s2-train-single-gpu-ddp.patch
+git apply --check E:\WorkSpace\Aemeath\docs\patches\upstream\s2-train-single-gpu-ddp.patch
+git apply       E:\WorkSpace\Aemeath\docs\patches\upstream\s2-train-single-gpu-ddp.patch
 ```
 
-补丁基准为该检出的 `48b1a01`。**应用前建议先 `git apply --check` 确认可套用**；
+补丁基准为该检出的 `48b1a01`。**应用前先 `git apply --check` 确认可套用**；
 若目标检出已含上游修复，补丁会因上下文不符而失败——此时应改用上游版本，不要强行套用。
 
+**确认是否已应用**（退出码 0 表示补丁已在位）：
+
+```powershell
+cd E:\WorkSpace\Tools\GPT-SoVITS
+git apply --check --reverse E:\WorkSpace\Aemeath\docs\patches\upstream\s2-train-single-gpu-ddp.patch
+```
+
 > 本次生成补丁时发现：直接把 `git diff` 输出重定向到文件会受 PowerShell 文本编码影响，
-> 产物可能**无法套用**。上面保存的补丁已用 `git apply --check` 对干净文件实测通过
-> （退出码 0），并在套用后重新跑通训练。后续更新该补丁时同样需要实测验证可套用性。
+> 产物可能**无法套用**。上面保存的补丁已用 `git apply --check` 实测通过（退出码 0）。
+> 用 `git show HEAD:<path>` 导出干净副本再套用的做法**会因行尾差异失败**，不能作为验证手段；
+> 应直接用 `--check --reverse` 判断在位状态。
+
+### 当前应用状态
+
+**本机已于 2026-09-15 应用该补丁。** 佐证：
+
+- `git apply --check --reverse` 退出码 0 —— 说明当前 `s2_train.py` 恰好等于「原始文件 + 本补丁」，
+  不多不少；
+- 应用后真实训练通过：`succeeded`，1 epoch 27.54s，产出
+  `aemeath_verify_v2_e1_s100.pth` / `aemeath_verify_v2_e2_s200.pth`。
+
+该状态只存在于本机检出，**不在本仓库版本管理范围内**；换机器或重装上游后需重新应用。
 
 ### 状态说明
 
 - 该补丁**未提交给上游**，也**不在本仓库版本管理范围内生效**。
-- V2-T06（完整声音训练向导）若要真正训练，必须先满足此前提（应用本补丁，或升级到上游已修复
-  的版本）。
+- V2-T06（完整声音训练向导）已按此前提推进：向导在启动训练前做预检，
+  检出未修复时明确报错并指向本文件，而不是让训练崩在一分钟后。
 - 上游修复正式发布后应改用上游版本，并重新验证本文件所列读数。

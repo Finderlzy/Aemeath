@@ -16,6 +16,18 @@
 
 2026-09-14 使用内置 imagegen 尝试仅移除背景，要求保持原稿位置、比例与细节并输出真实 alpha。结果仍为 RGB，棋盘格被绘入背景，局部细节发生变化，未通过验收；失败产物已删除。不得把棋盘格图片当作透明 PNG。
 
+### V21-T01 实测复盘（2026-09-17，基线 `f77f164`）
+
+**本轮复盘发现：导出包已存在但参数零绑定，验证脚本存在假绿灯。** 以下为亲手跑命令得到的实测结果，不是计划描述。
+
+**抠图与分层（通过，复跑确认）。** 用 venv Python 复跑 `scripts/verify_live2d_sample.py`，原稿 SHA256 一致、透明 78.8%、PSD 8 层读回通过，8 passed 0 skipped。
+
+**导出包参数零绑定（未通过）。** `references/character/live2d/export/sample-v1/aemeath-sample.moc3` 存在，9856 字节，moc3 版本号 4（≤5，通过 Core 加载检查），客户端 Core 能 revive，27 个参数全部存在。但 `node scripts/probe_live2d_core.js ...model3.json` 实测：把 `ParamMouthOpenY` 从 0 推到 1，`max vertex displacement = 0.000000`，exit 1——参数没有绑定到任何顶点，模型能加载但驱动不动。跨 27 个参数扫查（`scripts/test_displacement.js`）无一移动。该导出包是空壳，不构成 V21-T01 通过证据。
+
+**验证脚本假绿灯（必须修复）。** `scripts/verify_live2d_sample.py` 对上述零绑定空壳报 8 passed 0 failed 0 skipped——它只查文件存在、moc3 版本号和引用是否解析，不查参数是否绑定、顶点是否驱动。这是"坏了没人会知道"的失效报警器：下一轮若同样导出无绑定 moc3，verify 仍全绿，掩盖真实失败。修复方向：在 verify 的导出包检查段后新增"参数有绑定"项，subprocess 调 `node scripts/probe_live2d_core.js`，断言 exit 0 且 stdout 含 `displacement` 且数值 >0；不许吞 returncode、不许 try/except 当 SKIP、不许 mock。
+
+**Cubism 自动化边界（实测，非推测）。** 导入 PSD、建立变形器、导出 moc3 三步必须人工在 GUI 中完成：编辑器是 Java/Swing 程序，无任何命令行导出入口；其自带 `Live2DCubismCore.jar` 只有运行时类（`CubismMoc`、`CubismModel`、`CubismParameters`），只能读 moc3 不能生成；官方 External API 只能读写参数，且默认关闭、需在 GUI 内手动开启。Krita 侧同样受限：无 GUI 时 `exportImage` 会阻塞在模态对话框（PNG 与 PSD 都如此），`saveAs` 到 `.psd` 同样阻塞，因此分层工程由 Krita 生成、PSD 由脚本写出再用 Krita 读回校验。**本轮复盘新增结论：反复尝试自动化 GUI 绑定是 agent 推进缓慢的主因**——根目录 8 个未跟踪诊断脚本（`check_dlls.py`、`diag_model.js`、`dump_pe_strings.py`、`inspect_moc_mesh.js`、`start_cubism.bat`、`test_displacement.js`、`test_launch_cubism.py`、`test_run_cubism.py`）是这一失败路径的痕迹，须清理；后续绑定步骤明确隔离为人工操作，不再尝试脚本驱动 GUI。
+
 ### V21-T01 实测记录（2026-09-15）
 
 **抠图与分层已通过，Cubism 三步必须在编辑器内手动完成。**

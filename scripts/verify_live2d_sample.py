@@ -13,6 +13,14 @@ The pinned Aemeath client's Core stops at version 5, so a default export loads
 in the editor and is rejected by the client. The version is therefore read
 straight out of the file header.
 
+**A moc3 that loads but drives nothing.** A model whose parameters are not
+bound to any ArtMesh still loads, still reports its parameter list, and moves
+zero vertices -- the 2026-09-17 zero-binding export passed every file-level
+check this script had. For each model3.json the probe is therefore run for
+real: the check passes only when the pinned client's Core revives the moc,
+drives a parameter to the end of its range, and sees geometry actually move.
+This check never degrades to a SKIP on probe failure.
+
 Usage::
 
     python scripts/verify_live2d_sample.py
@@ -28,7 +36,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import struct
+import subprocess
 import sys
 from pathlib import Path
 
@@ -44,6 +54,11 @@ APPROVED_SHA256 = "252825a4ef3c802d5e9ae4e5a76a242eef4cfc6f8ca8e2af704d31d3215fd
 APPROVED = ROOT / "docs" / "images" / "live2d" / "aemeath-approved-v4.png"
 WORK = ROOT / "references" / "character" / "live2d" / "work"
 DEFAULT_EXPORT = ROOT / "references" / "character" / "live2d" / "export"
+
+#: The probe prints ``max vertex displacement = <float>`` when it has driven a
+#: parameter and compared vertex snapshots. This is the only accepted evidence
+#: that a parameter is bound to geometry.
+DISPLACEMENT_RE = re.compile(r"max vertex displacement = ([0-9.eE+-]+)")
 
 
 class Report:
@@ -237,6 +252,80 @@ def check_export(report: Report, export_dir: Path) -> None:
             report.ok(f"{model3.name} references resolve", f"{len(needed)} file refs")
 
 
+def check_parameter_binding(report: Report, export_dir: Path) -> None:
+    """Each exported model actually drives geometry in the client's Core.
+
+    This runs ``scripts/probe_live2d_core.js`` for real -- no mock, no shortcut.
+    A pass requires all three: the probe exits 0, its output contains a
+    displacement measurement, and that displacement is greater than zero. Any
+    probe failure (missing node, timeout, Core rejection, zero displacement)
+    is a FAIL, never a SKIP: a model that cannot be probed is a model that
+    cannot be accepted.
+    """
+    print("[5] parameter binding (probe drives geometry in the client Core)")
+
+    model3_files = sorted(export_dir.rglob("*.model3.json")) if export_dir.is_dir() else []
+    if not model3_files:
+        report.fail(
+            "parameter binding probed",
+            f"no .model3.json under {export_dir}; nothing to drive",
+        )
+        return
+
+    probe = ROOT / "scripts" / "probe_live2d_core.js"
+    if not probe.is_file():
+        report.fail("probe script present", f"missing: {probe}")
+        return
+
+    for model3 in model3_files:
+        try:
+            result = subprocess.run(
+                ["node", str(probe), str(model3)],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        except subprocess.TimeoutExpired:
+            report.fail(
+                f"{model3.name} drives geometry",
+                "probe_live2d_core.js timed out after 60s",
+            )
+            continue
+        except OSError as exc:
+            report.fail(f"{model3.name} drives geometry", f"cannot run node: {exc}")
+            continue
+
+        tail = "\n".join(result.stdout.strip().splitlines()[-6:])
+        if result.returncode != 0:
+            report.fail(
+                f"{model3.name} drives geometry",
+                f"probe exit code {result.returncode} (0 required); probe output tail:\n{tail}",
+            )
+            continue
+
+        match = DISPLACEMENT_RE.search(result.stdout)
+        if not match:
+            report.fail(
+                f"{model3.name} drives geometry",
+                f"probe exited 0 but reported no displacement; output tail:\n{tail}",
+            )
+            continue
+
+        displacement = float(match.group(1))
+        if displacement <= 0:
+            report.fail(
+                f"{model3.name} drives geometry",
+                f"max vertex displacement = {displacement}; the parameter is "
+                "not bound to any vertices (the zero-binding shell)",
+            )
+            continue
+
+        report.ok(
+            f"{model3.name} drives geometry",
+            f"probe exit 0, max vertex displacement = {displacement:.6f}",
+        )
+
+
 def write_manifest(export_dir: Path) -> None:
     """Record path, size and SHA256 for everything in the export package."""
     if not export_dir.is_dir():
@@ -276,6 +365,7 @@ def main() -> int:
     check_cutout(report)
     check_psd(report)
     check_export(report, args.export_dir)
+    check_parameter_binding(report, args.export_dir)
     write_manifest(args.export_dir)
     return report.summary()
 

@@ -2,9 +2,21 @@
 
 ## v2.1 Live2D 并行制作计划（2026-09-14）
 
-目标版本 **v2.1**，与 v2 并行推进正式角色资产及接入，不据此修改软件版本、打标签或启动开发。本轮完成规划与 Issues 发布，外观定稿为已完成输入；抠图、分层、绑定和运行验收仍待执行。
+目标版本 **v2.1**，与 v2 并行推进正式角色资产及接入，不据此修改软件版本、打标签或启动开发。本轮完成规划与 Issues 发布，外观定稿为已完成输入；抠图与分层已通过，绑定、moc3 导出与运行验收尚未完成（2026-09-17 复盘确认导出包参数零绑定，详见下文本轮复盘）。
 
-依据：[需求 V21-01–V21-05](requirements.md#v21-正式-live2d-制作与接入2026-09-14)、[实施前评审](architecture.md#v21-live2d-实施前评审2026-09-14)、[制作契约](live2d-production.md)、[复用核查](reuse-research.md#v21-live2d-制作复用核查2026-09-14)。规划代码基线为 `5e0f25a`。
+依据：[需求 V21-01–V21-05](requirements.md#v21-正式-live2d-制作与接入2026-09-14)、[实施前评审](architecture.md#v21-live2d-实施前评审2026-09-14)、[制作契约](live2d-production.md)、[复用核查](reuse-research.md#v21-live2d-制作复用核查2026-09-14)。规划代码基线为 `5e0f25a`；2026-09-17 复盘基线 `f77f164`。
+
+### 2026-09-17 复盘：V21-T01 实测状态与验证缺口
+
+基线 `f77f164`（远端 main，clean tree）上亲手跑命令得到以下实测结果，不是计划描述：
+
+- 抠图与分层通过：原稿 SHA256 一致、透明 78.8%、PSD 8 层读回通过，`verify_live2d_sample.py` 8 passed 0 skipped（须用 venv Python，系统 Python 缺 numpy/PIL 会跳过）。
+- 导出包参数零绑定：`references/character/live2d/export/sample-v1/aemeath-sample.moc3` 存在、版本号 4（≤5）、客户端 Core 能 revive，但 27 个参数全部 keyCount=0，`probe_live2d_core.js` 把 ParamMouthOpenY 0→1，`maxDisplacement=0.000000`，exit 1。该包是空壳，不构成通过证据。
+- 验证脚本假绿灯：`verify_live2d_sample.py` 对零绑定空壳报 8 PASS 0 FAIL，因为只查文件存在和版本号，不查参数是否绑定、顶点是否驱动。必须补严：新增"参数有绑定"检查项，subprocess 调 probe，断言 exit 0 且 displacement>0。
+- GUI 自动化不可行：Cubism Editor 无 CLI、自带 Core 只读、External API 默认关且只读写参数值——这三条早已记录在 `live2d-production.md`。根目录 8 个未跟踪诊断脚本（`check_dlls.py`、`diag_model.js`、`dump_pe_strings.py`、`inspect_moc_mesh.js`、`start_cubism.bat`、`test_displacement.js`、`test_launch_cubism.py`、`test_run_cubism.py`）是反复尝试自动化 GUI 绑定的失败痕迹，须清理；后续绑定明确隔离为人工操作。
+- pytest 基线：`--co -m "not live_api"` 收集 634 项（未跑全量，作为后续回归基线）。
+
+结论：V21-T01 的 5 条验收标准中，前 2 条通过，第 3 条（参数可变形并在客户端 Core 中驱动）未通过。#21 验收标准原文缺可执行验证命令和防作弊条，本次已更新 Issue 正文补齐（见下文）。
 
 > **v2 任务状态（核查记录，随 GitHub 变化）。** 2026-09-16 核查：#14–#19 均已 closed，#20（V2-T07 完整 v2 交付验收）已完成整体验收。状态以 Issue 为准，本节记录已同步。
 
@@ -12,7 +24,7 @@
 
 用户已确认 [v4 立绘](images/live2d/aemeath-approved-v4.png)，原稿为 1254 × 1254 RGB；原始图片与视频留本地，细节视频只参考前 35 秒。Krita 与 Cubism 已安装到 D 盘，程序文件存在；尚未验证启动、编辑模式、自动操作能力、分层或导出。
 
-先执行 **V21-T01 #21**，用少量真实素材证明 alpha、PSD、单参数绑定、moc3 导出及固定客户端加载成立。成功后才进入完整分层／绑定；失败记录具体限制及人工替代步骤，后续任务保持依赖阻塞。不得将编辑器安装、棋盘格图片或 JSON 文件存在当作通过。
+先执行 **V21-T01 #21**，用少量真实素材证明 alpha、PSD、单参数绑定、moc3 导出及固定客户端加载成立。成功后才进入完整分层／绑定；失败记录具体限制及人工替代步骤，后续任务保持依赖阻塞。不得将编辑器安装、棋盘格图片或 JSON 文件存在当作通过。**2026-09-17 复盘补充**：导出包已存在但参数零绑定（probe exit 1，displacement=0），verify 对它报 8 PASS 属假绿灯；绑定步骤物理上只能人类在 Cubism Editor GUI 内完成，反复尝试自动化是推进缓慢主因，后续明确隔离为人工操作。
 
 ### 里程碑与任务映射
 
